@@ -130,8 +130,10 @@ use {
 use {
     rusqlite::named_params,
     zcash_client_backend::data_api::{OutputOfSentTx, WalletTest, testing::TransactionSummary},
-    zcash_keys::address::Address,
 };
+
+#[cfg(any(test, feature = "test-dependencies", feature = "transparent-inputs"))]
+use zcash_keys::address::Address;
 
 #[cfg(any(test, feature = "test-dependencies", feature = "transparent-inputs"))]
 use crate::wallet::encoding::KeyScope;
