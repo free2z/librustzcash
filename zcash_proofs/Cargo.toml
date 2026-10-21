@@ -26,7 +26,7 @@ bellman.workspace = true
 bls12_381.workspace = true
 group.workspace = true
 jubjub.workspace = true
-minreq = { version = "2", features = ["https"], optional = true }
+minreq = { version = "3", features = ["https"], optional = true }
 rand_core.workspace = true
 sapling.workspace = true
 tracing.workspace = true
