@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "packages": [
+    {
+      "name": "utf8-zero",
+      "version": "0.8.1",
+      "source": "git+https://github.com/free2z/utf8-zero?rev=c6fdaade595b9f8a8a8c24d7ab152213532b8fd8#c6fdaade595b9f8a8a8c24d7ab152213532b8fd8",
+      "revision": "c6fdaade595b9f8a8a8c24d7ab152213532b8fd8",
+      "tree": "c86aae0c1d0164774c06c2488e3c105d453881f0",
+      "owner": "Free2Z maintainers",
+      "review": "https://github.com/free2z/utf8-zero/pull/1",
+      "upstream_pr": "https://github.com/algesten/utf8-zero/pull/2",
+      "files": {
+        ".github/workflows/ci.yml": {
+          "sha256": "4e3768c7b464a570a3ab3d8822879b8039b67b456233d1d6e63c9f5c99a14d74",
+          "executable": false
+        },
+        ".github/workflows/fuzz.yml": {
+          "sha256": "9d38bc042ed608d4036868b0ad5cbeb8f05ed5867dbbc1e72e56149db8452a53",
+          "executable": false
+        },
+        ".gitignore": {
+          "sha256": "90dff016f5730a994ecd7500bd1a03efff501c912d73f9aff8c8e8cf17df5cad",
+          "executable": false
+        },
+        ".taplo.toml": {
+          "sha256": "5a739a6e4635d434b9e2bb709db04ed16c361e7e0549075a0a1017f74dedb4e8",
+          "executable": false
+        },
+        "Cargo.toml": {
+          "sha256": "937f55a10b2ba916170b76450820cd2517e02d42d3322e91da4db1a72a920df1",
+          "executable": false
+        },
+        "LICENSE-APACHE": {
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "executable": false
+        },
+        "LICENSE-MIT": {
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "executable": false
+        },
+        "README.md": {
+          "sha256": "b55650b973b0e08385793a1bdbc5d76039ad8aa107304d892cdfcfe4ae63dbbc",
+          "executable": false
+        },
+        "fuzz/Cargo.toml": {
+          "sha256": "7ab3a62086cdb20dfe44ba69694215a9b41a93f23cb040a01bb3982e98b11e5e",
+          "executable": false
+        },
+        "fuzz/fuzz_targets/fuzz_bufread_decoder.rs": {
+          "sha256": "519b89c20bebe1a5e3aabd28c9e8816a8a4d941aa29a98c76b5e9c8b4af8cfca",
+          "executable": false
+        },
+        "fuzz/fuzz_targets/fuzz_decode.rs": {
+          "sha256": "0afdf218f54c687d9775d3fbc61e1ce673cbb5dbb07d3872641fce8030bdb12e",
+          "executable": false
+        },
+        "fuzz/fuzz_targets/fuzz_lossy_decoder.rs": {
+          "sha256": "8315aa9a1efc257ecf6335d2ecb5b111f994aa045fa0d3acd9745a32e75ba988",
+          "executable": false
+        },
+        "src/lib.rs": {
+          "sha256": "ec1ead62aead7bc52dad7e062942dc1566d856d5d13c0bf4f1c4fb53fbb0821b",
+          "executable": false
+        },
+        "src/lossy.rs": {
+          "sha256": "265a5a525e51674413896c1f8ec40d6c111e2da6c5e5f2de5d0659f2dcc516b7",
+          "executable": false
+        },
+        "src/read.rs": {
+          "sha256": "a6abb9f892c89aa4b6f2b8104112273d5c7f53298157095f6520c77e94660588",
+          "executable": false
+        },
+        "tests/unit.rs": {
+          "sha256": "f5ba697197ac4bf1dbdcdceb2de7d285f1f2982427b5fd871b4fc512853fd674",
+          "executable": false
+        }
+      }
+    }
+  ]
+}

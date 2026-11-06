@@ -6786,8 +6786,7 @@ dependencies = [
 [[package]]
 name = "utf8-zero"
 version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
+source = "git+https://github.com/free2z/utf8-zero?rev=c6fdaade595b9f8a8a8c24d7ab152213532b8fd8#c6fdaade595b9f8a8a8c24d7ab152213532b8fd8"
 
 [[package]]
 name = "utf8_iter"

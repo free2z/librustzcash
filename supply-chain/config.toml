@@ -25,6 +25,10 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
+# Owned source is enforced by the required exact-source check, not a registry audit.
+[policy.utf8-zero]
+audit-as-crates-io = false
+
 [policy.eip681]
 audit-as-crates-io = true
 

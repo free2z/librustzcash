@@ -232,3 +232,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(zcash_unstable, values("nutachyon", "zip233"))',
   'cfg(live_network_tests)',
 ] }
+
+# Reviewed source bridge; identity is enforced by supply-chain/check_owned_sources.py.
+[patch.crates-io]
+utf8-zero = { git = "https://github.com/free2z/utf8-zero", rev = "c6fdaade595b9f8a8a8c24d7ab152213532b8fd8" }

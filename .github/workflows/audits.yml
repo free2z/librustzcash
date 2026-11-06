@@ -24,6 +24,10 @@ jobs:
         env:
           TOOLCHAIN: ${{steps.toolchain.outputs.name}}
       - run: cargo install cargo-vet --version ~0.10
+      - name: Verify exact reviewed dependency sources
+        run: |
+          python3 supply-chain/test_owned_sources.py
+          python3 supply-chain/check_owned_sources.py
       - run: cargo vet --locked
 
   cargo-deny:
