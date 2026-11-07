@@ -267,7 +267,7 @@ mod tests {
             stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(ACCEPT_TIMEOUT)).unwrap();
             let mut request = [0; REQUEST_BUFFER_BYTES];
-            stream.read(&mut request).unwrap();
+            assert!(stream.read(&mut request).unwrap() > 0);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\npar")
                 .unwrap();

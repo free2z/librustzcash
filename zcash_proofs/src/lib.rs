@@ -189,7 +189,7 @@ fn fetch_params_at(
     // TODO: use try_exists when it stabilises, to exit early on permissions errors (#83186)
     if !params_path.exists() {
         let result = stream_params_downloads_to_disk(
-            &params_path,
+            params_path,
             name,
             expected_hash,
             expected_bytes,
@@ -199,7 +199,7 @@ fn fetch_params_at(
 
         // Remove the file on error, and return the download or hash error.
         if result.is_err() {
-            let _ = std::fs::remove_file(&params_path);
+            let _ = std::fs::remove_file(params_path);
             result?;
         }
     } else {
@@ -211,14 +211,14 @@ fn fetch_params_at(
         let file_path_string = params_path.to_string_lossy();
 
         // Check the file size is correct before hashing large amounts of data.
-        verify_file_size(&params_path, expected_bytes, name, &file_path_string).expect(
+        verify_file_size(params_path, expected_bytes, name, &file_path_string).expect(
             "parameter file size is not correct, \
              please clean your Zcash parameters directory and re-run `fetch-params`.",
         );
 
         // Read the file to verify the hash,
         // discarding bytes after they're hashed.
-        let params_file = File::open(&params_path)?;
+        let params_file = File::open(params_path)?;
         let params_file = BufReader::with_capacity(1024 * 1024, params_file);
         let params_file = hashreader::HashReader::new(params_file);
 
