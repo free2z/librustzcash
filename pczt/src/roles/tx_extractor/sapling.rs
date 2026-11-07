@@ -1,23 +1,13 @@
-use rand_core::OsRng;
+use rand_core::CryptoRng;
 use sapling::{
     BatchValidator, Bundle,
     bundle::Authorized,
     circuit::{OutputVerifyingKey, SpendVerifyingKey},
-    pczt::Unbound,
 };
 use zcash_protocol::value::ZatBalance;
 
-pub(super) fn extract_bundle(
-    bundle: crate::sapling::Bundle,
-) -> Result<Option<Bundle<Unbound, ZatBalance>>, SaplingError> {
-    bundle
-        .into_parsed()
-        .map_err(SaplingError::Parse)?
-        .extract()
-        .map_err(SaplingError::Extract)
-}
-
 pub(super) fn verify_bundle(
+    rng: impl CryptoRng,
     bundle: &Bundle<Authorized, ZatBalance>,
     spend_vk: &SpendVerifyingKey,
     output_vk: &OutputVerifyingKey,
@@ -29,7 +19,7 @@ pub(super) fn verify_bundle(
         return Err(SaplingError::ConsensusRuleViolation);
     }
 
-    if !validator.validate(spend_vk, output_vk, OsRng) {
+    if !validator.validate(spend_vk, output_vk, rng) {
         return Err(SaplingError::InvalidProofsOrSignatures);
     }
 
@@ -41,5 +31,4 @@ pub enum SaplingError {
     ConsensusRuleViolation,
     Extract(sapling::pczt::TxExtractorError),
     InvalidProofsOrSignatures,
-    Parse(sapling::pczt::ParseError),
 }

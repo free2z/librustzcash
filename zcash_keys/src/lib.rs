@@ -12,8 +12,6 @@
 #![cfg_attr(docsrs, doc(auto_cfg))]
 // Catch documentation errors caused by code changes.
 #![deny(rustdoc::broken_intra_doc_links)]
-// Temporary until we have addressed all Result<T, ()> cases.
-#![allow(clippy::result_unit_err)]
 
 #[macro_use]
 extern crate alloc;
@@ -22,6 +20,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod address;
+pub mod constants;
 pub mod encoding;
 
 #[cfg(any(

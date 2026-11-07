@@ -11,11 +11,9 @@
 #![cfg_attr(docsrs, doc(auto_cfg))]
 // Catch documentation errors caused by code changes.
 #![deny(rustdoc::broken_intra_doc_links)]
-// Temporary until we have addressed all Result<T, ()> cases.
-#![allow(clippy::result_unit_err)]
 
-use bellman::groth16::{PreparedVerifyingKey, VerifyingKey, prepare_verifying_key};
 use bls12_381::Bls12;
+use groth16::{PreparedVerifyingKey, VerifyingKey, prepare_verifying_key};
 use sapling::circuit::{
     OutputParameters, PreparedOutputVerifyingKey, PreparedSpendVerifyingKey, SpendParameters,
 };
@@ -168,22 +166,40 @@ fn fetch_params(
         .ok_or_else(|| io::Error::other("Could not load default params folder"))?;
     std::fs::create_dir_all(&params_dir)?;
 
-    let params_path = params_dir.join(name);
+    fetch_params_at(
+        &params_dir.join(name),
+        name,
+        expected_hash,
+        expected_bytes,
+        timeout,
+        DOWNLOAD_URL,
+    )
+}
 
+#[cfg(feature = "download-params")]
+fn fetch_params_at(
+    params_path: &Path,
+    name: &str,
+    expected_hash: &str,
+    expected_bytes: u64,
+    timeout: Option<u64>,
+    download_url: &str,
+) -> Result<PathBuf, minreq::Error> {
     // Download parameters if needed.
     // TODO: use try_exists when it stabilises, to exit early on permissions errors (#83186)
     if !params_path.exists() {
         let result = stream_params_downloads_to_disk(
-            &params_path,
+            params_path,
             name,
             expected_hash,
             expected_bytes,
             timeout,
+            download_url,
         );
 
         // Remove the file on error, and return the download or hash error.
         if result.is_err() {
-            let _ = std::fs::remove_file(&params_path);
+            let _ = std::fs::remove_file(params_path);
             result?;
         }
     } else {
@@ -195,14 +211,14 @@ fn fetch_params(
         let file_path_string = params_path.to_string_lossy();
 
         // Check the file size is correct before hashing large amounts of data.
-        verify_file_size(&params_path, expected_bytes, name, &file_path_string).expect(
+        verify_file_size(params_path, expected_bytes, name, &file_path_string).expect(
             "parameter file size is not correct, \
              please clean your Zcash parameters directory and re-run `fetch-params`.",
         );
 
         // Read the file to verify the hash,
         // discarding bytes after they're hashed.
-        let params_file = File::open(&params_path)?;
+        let params_file = File::open(params_path)?;
         let params_file = BufReader::with_capacity(1024 * 1024, params_file);
         let params_file = hashreader::HashReader::new(params_file);
 
@@ -216,7 +232,7 @@ fn fetch_params(
         )?;
     }
 
-    Ok(params_path)
+    Ok(params_path.to_owned())
 }
 
 /// Download the specified parameter file, stream it to `params_path`, and check its hash.
@@ -229,8 +245,9 @@ fn stream_params_downloads_to_disk(
     expected_hash: &str,
     expected_bytes: u64,
     timeout: Option<u64>,
+    download_url: &str,
 ) -> Result<(), minreq::Error> {
-    use downloadreader::ResponseLazyReader;
+    use downloadreader::DownloadReader;
     use std::io::{BufWriter, Read};
 
     // Fail early if the directory isn't writeable.
@@ -242,21 +259,12 @@ fn stream_params_downloads_to_disk(
     // It's necessary for us to host these files in two parts,
     // because of CloudFlare's maximum cached file size limit of 512 MB.
     // The files must fit in the cache to prevent "denial of wallet" attacks.
-    let params_url_1 = format!("{DOWNLOAD_URL}/{name}.part.1");
+    let params_url_1 = format!("{download_url}/{name}.part.1");
     // TODO: skip empty part.2 files when downloading sapling spend and sapling output
-    let params_url_2 = format!("{DOWNLOAD_URL}/{name}.part.2");
+    let params_url_2 = format!("{download_url}/{name}.part.2");
 
-    let mut params_download_1 = minreq::get(&params_url_1);
-    let mut params_download_2 = minreq::get(&params_url_2);
-    if let Some(timeout) = timeout {
-        params_download_1 = params_download_1.with_timeout(timeout);
-        params_download_2 = params_download_2.with_timeout(timeout);
-    }
-
-    // Download the responses and write them to a new file,
-    // verifying the hash as bytes are read.
-    let params_download_1 = ResponseLazyReader::from(params_download_1);
-    let params_download_2 = ResponseLazyReader::from(params_download_2);
+    let params_download_1 = DownloadReader::new(&params_url_1, timeout);
+    let params_download_2 = DownloadReader::new(&params_url_2, timeout);
 
     // Limit the download size to avoid DoS.
     // This also avoids launching the second request, if the first request provides enough bytes.
@@ -348,7 +356,7 @@ pub fn load_parameters(
 ///
 /// This function will panic if it encounters unparsable data.
 ///
-/// [`groth16::Parameters::write`]: bellman::groth16::Parameters::write
+/// [`groth16::Parameters::write`]: groth16::Parameters::write
 pub fn parse_parameters<R: io::Read>(
     spend_fs: R,
     output_fs: R,
@@ -508,4 +516,132 @@ fn verify_hash<R: io::Read, W: io::Write>(
     }
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "download-params"))]
+mod download_recovery_tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        process::Command,
+        thread,
+        time::Duration,
+    };
+
+    #[test]
+    fn parameter_download_errors_remove_partial_files_and_retry() {
+        const CHILD: &str = "ZCASH_PARAMETER_DOWNLOAD_RECOVERY_CHILD";
+        const DIRECTORY: &str = "ZCASH_PARAMETER_DOWNLOAD_RECOVERY_DIRECTORY";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            for mode in ["download-first", "cached", "https-first"] {
+                let result = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "download_recovery_tests::parameter_download_errors_remove_partial_files_and_retry", "--nocapture"])
+                    .env(CHILD, mode).env(DIRECTORY, directory.path()).status().unwrap();
+                assert!(result.success());
+            }
+            return;
+        }
+        let mode = std::env::var(CHILD).unwrap();
+        let directory = std::path::PathBuf::from(std::env::var_os(DIRECTORY).unwrap());
+        let path = directory.join("test.params");
+        let body = b"parameter bytes";
+        let expected_hash = blake2b_simd::Params::new()
+            .hash_length(64)
+            .hash(body)
+            .to_hex()
+            .to_string();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_none());
+        if mode == "cached" {
+            // Cached parameters bypass the downloader entirely. A different TLS
+            // client must still initialize successfully before Tor is started.
+            super::fetch_params_at(
+                &path,
+                "test.params",
+                &expected_hash,
+                body.len() as u64,
+                Some(2),
+                "https://127.0.0.1:1",
+            )
+            .unwrap();
+            assert!(rustls::crypto::CryptoProvider::get_default().is_none());
+            let _ = rustls::ClientConfig::builder();
+            return;
+        }
+        if mode == "https-first" {
+            let _ = rustls::ClientConfig::builder();
+            std::fs::remove_file(&path).unwrap();
+        }
+        for (tls_failure, wrong_hash) in
+            [(true, false), (false, true), (true, false), (false, false)]
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let server = thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(5))
+                        }
+                        other => panic!("bounded accept failed: {other:?}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let read = stream.read(&mut request).unwrap();
+                if tls_failure {
+                    assert!(request[..read].starts_with(&[0x16, 0x03]));
+                } else {
+                    assert!(request[..read].starts_with(b"GET /test.params.part.1 HTTP/1.1"));
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\nparameter bytes").unwrap();
+                }
+            });
+            let scheme = if tls_failure { "https" } else { "http" };
+            let result: Result<std::path::PathBuf, minreq::Error> = super::fetch_params_at(
+                &path,
+                "test.params",
+                if wrong_hash {
+                    "invalid hash"
+                } else {
+                    &expected_hash
+                },
+                body.len() as u64,
+                Some(2),
+                &format!("{scheme}://{address}"),
+            );
+            server.join().unwrap();
+            if tls_failure || wrong_hash {
+                assert!(result.is_err());
+                assert!(
+                    !path.exists(),
+                    "failed download must not poison a later startup"
+                );
+            } else {
+                assert_eq!(result.unwrap(), path);
+                assert_eq!(std::fs::read(&path).unwrap(), body);
+            }
+        }
+        // A completed file is revalidated without another network request.
+        assert_eq!(
+            super::fetch_params_at(
+                &path,
+                "test.params",
+                &expected_hash,
+                body.len() as u64,
+                Some(2),
+                "https://127.0.0.1:1"
+            )
+            .unwrap(),
+            path
+        );
+    }
 }

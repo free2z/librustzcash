@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 use core::mem::size_of;
-use core2::io::{Cursor, Read};
+use corez::io::{Cursor, Read};
 
 use crate::params::Params;
 
@@ -12,7 +12,7 @@ fn compress_array(array: &[u8], bit_len: usize, byte_pad: usize) -> Vec<u8> {
     assert!(bit_len >= 8);
     assert!(8 * index_bytes >= 7 + bit_len);
 
-    let in_width: usize = (bit_len + 7) / 8 + byte_pad;
+    let in_width: usize = bit_len.div_ceil(8) + byte_pad;
     let out_len = bit_len * array.len() / (8 * in_width);
 
     let mut out = Vec::with_capacity(out_len);
@@ -32,9 +32,9 @@ fn compress_array(array: &[u8], bit_len: usize, byte_pad: usize) -> Vec<u8> {
             for x in byte_pad..in_width {
                 acc_value |= (
                     // Apply bit_len_mask across byte boundaries
-                    (array[j + x] & ((bit_len_mask >> (8 * (in_width - x - 1))) as u8)) as u32
+                    u32::from(array[j + x] & ((bit_len_mask >> (8 * (in_width - x - 1))) as u8))
                 )
-                    .wrapping_shl(8 * (in_width - x - 1) as u32); // Big-endian
+                .wrapping_shl(8 * (in_width - x - 1) as u32); // Big-endian
             }
             j += in_width;
             acc_bits += bit_len;
@@ -47,19 +47,35 @@ fn compress_array(array: &[u8], bit_len: usize, byte_pad: usize) -> Vec<u8> {
     out
 }
 
-pub(crate) fn expand_array(vin: &[u8], bit_len: usize, byte_pad: usize) -> Vec<u8> {
+pub(super) fn expand_array(vin: &[u8], bit_len: usize, byte_pad: usize) -> Vec<u8> {
+    let mut vout = vec![0; expanded_len(vin.len(), bit_len, byte_pad)];
+    expand_array_into(vin, bit_len, byte_pad, &mut vout);
+    vout
+}
+
+/// The length of `expand_array(vin, bit_len, byte_pad)` for `vin_len` input
+/// bytes.
+pub(super) fn expanded_len(vin_len: usize, bit_len: usize, byte_pad: usize) -> usize {
+    8 * (bit_len.div_ceil(8) + byte_pad) * vin_len / bit_len
+}
+
+/// Writes `expand_array(vin, bit_len, byte_pad)` to `vout`, which must have
+/// the length [`expanded_len`] returns.
+pub(super) fn expand_array_into(vin: &[u8], bit_len: usize, byte_pad: usize, vout: &mut [u8]) {
     assert!(bit_len >= 8);
     assert!(u32::BITS as usize >= 7 + bit_len);
 
-    let out_width = (bit_len + 7) / 8 + byte_pad;
-    let out_len = 8 * out_width * vin.len() / bit_len;
+    let out_width = bit_len.div_ceil(8) + byte_pad;
+    assert_eq!(vout.len(), expanded_len(vin.len(), bit_len, byte_pad));
 
     // Shortcut for parameters where expansion is a no-op
-    if out_len == vin.len() {
-        return vin.to_vec();
+    if vout.len() == vin.len() {
+        vout.copy_from_slice(vin);
+        return;
     }
 
-    let mut vout: Vec<u8> = vec![0; out_len];
+    // The padding bytes of each output element are never written below.
+    vout.fill(0);
     let bit_len_mask: u32 = (1 << bit_len) - 1;
 
     // The acc_bits least-significant bits of acc_value represent a bit sequence
@@ -88,17 +104,15 @@ pub(crate) fn expand_array(vin: &[u8], bit_len: usize, byte_pad: usize) -> Vec<u
             j += out_width;
         }
     }
-
-    vout
 }
 
 // Rough translation of GetMinimalFromIndices() from:
 // https://github.com/zcash/zcash/blob/6fdd9f1b81d3b228326c9826fa10696fc516444b/src/crypto/equihash.cpp#L130-L145
 #[cfg(any(feature = "solver", test))]
-pub(crate) fn minimal_from_indices(p: Params, indices: &[u32]) -> Vec<u8> {
+pub(super) fn minimal_from_indices(p: Params, indices: &[u32]) -> Vec<u8> {
     let c_bit_len = p.collision_bit_length();
     let index_bytes = (u32::BITS / 8) as usize;
-    let digit_bytes = ((c_bit_len + 1) + 7) / 8;
+    let digit_bytes = (c_bit_len + 1).div_ceil(8);
     assert!(digit_bytes <= index_bytes);
 
     let len_indices = indices.len() * index_bytes;
@@ -117,29 +131,28 @@ pub(crate) fn minimal_from_indices(p: Params, indices: &[u32]) -> Vec<u8> {
     compress_array(&array, c_bit_len + 1, byte_pad)
 }
 
-fn read_u32_be(csr: &mut Cursor<Vec<u8>>) -> core2::io::Result<u32> {
+fn read_u32_be(csr: &mut Cursor<Vec<u8>>) -> corez::io::Result<u32> {
     let mut n = [0; 4];
     csr.read_exact(&mut n)?;
     Ok(u32::from_be_bytes(n))
 }
 
 /// Returns `None` if the parameters are invalid for this minimal encoding.
-pub(crate) fn indices_from_minimal(p: Params, minimal: &[u8]) -> Option<Vec<u32>> {
+pub(super) fn indices_from_minimal(p: Params, minimal: &[u8]) -> Option<Vec<u32>> {
     let c_bit_len = p.collision_bit_length();
-    // Division is exact because k >= 3.
-    if minimal.len() != ((1 << p.k) * (c_bit_len + 1)) / 8 {
+    if minimal.len() != p.solution_bytes()? {
         return None;
     }
 
-    assert!(((c_bit_len + 1) + 7) / 8 <= size_of::<u32>());
+    assert!((c_bit_len + 1).div_ceil(8) <= size_of::<u32>());
     let len_indices = u32::BITS as usize * minimal.len() / (c_bit_len + 1);
-    let byte_pad = size_of::<u32>() - ((c_bit_len + 1) + 7) / 8;
+    let byte_pad = size_of::<u32>() - (c_bit_len + 1).div_ceil(8);
 
     let mut csr = Cursor::new(expand_array(minimal, c_bit_len + 1, byte_pad));
     let mut ret = Vec::with_capacity(len_indices);
 
     // Big-endian so that lexicographic array comparison is equivalent to integer
-    // comparison
+    // comparison.
     while let Ok(i) = read_u32_be(&mut csr) {
         ret.push(i);
     }
@@ -151,7 +164,15 @@ pub(crate) fn indices_from_minimal(p: Params, minimal: &[u8]) -> Option<Vec<u32>
 mod tests {
     use crate::minimal::minimal_from_indices;
 
-    use super::{compress_array, expand_array, indices_from_minimal, Params};
+    use super::{Params, compress_array, expand_array, indices_from_minimal};
+
+    #[test]
+    fn solution_length_overflow_is_rejected() {
+        let p = Params::new(512, 63).unwrap();
+        assert!(p.solution_bytes().is_none());
+        assert!(indices_from_minimal(p, &[]).is_none());
+        assert!(indices_from_minimal(p, &[0]).is_none());
+    }
 
     #[test]
     fn array_compression_and_expansion() {

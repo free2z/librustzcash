@@ -1,6 +1,6 @@
 [package]
 name = "pczt"
-version = "0.5.0"
+version = "0.10.0"
 authors = ["Jack Grigg <jack@electriccoin.co>"]
 edition.workspace = true
 rust-version.workspace = true
@@ -47,6 +47,10 @@ pasta_curves = { workspace = true, optional = true }
 
 # Dependencies used internally:
 # (Breaking upgrades to these are usually backwards-compatible, but check MSRVs.)
+# - Secret management
+subtle.workspace = true
+zeroize.workspace = true
+
 # - Boilerplate
 getset.workspace = true
 
@@ -54,9 +58,13 @@ getset.workspace = true
 document-features = { workspace = true, optional = true }
 
 [dev-dependencies]
+hex.workspace = true
 incrementalmerkletree.workspace = true
+proptest.workspace = true
+rand = { workspace = true, features = ["sys_rng"] }
+rand_chacha.workspace = true
 ripemd.workspace = true
-secp256k1 = { workspace = true, features = ["rand"] }
+secp256k1.workspace = true
 sha2.workspace = true
 shardtree.workspace = true
 zcash_primitives = { workspace = true, features = [
@@ -64,10 +72,11 @@ zcash_primitives = { workspace = true, features = [
     "transparent-inputs",
 ] }
 zcash_proofs = { workspace = true, features = ["bundled-prover"] }
+zcash_protocol = { workspace = true, features = ["local-consensus"] }
 zip32.workspace = true
 
 [features]
-default = ["std"]
+default = ["std", "orchard", "sapling"]
 std = ["document-features"]
 zip-233 = ["zcash_primitives/zip-233"]
 
@@ -77,6 +86,8 @@ orchard = [
     "dep:nonempty",
     "dep:orchard",
     "dep:pasta_curves",
+    "orchard/zeroize",
+    "dep:zcash_note_encryption",
 ]
 
 ## Enables functionality that requires Sapling protocol types.
@@ -87,13 +98,19 @@ sapling = [
     "dep:redjubjub",
     "dep:sapling",
     "dep:zcash_note_encryption",
+    "sapling/zeroize",
 ]
 
 ## Enables functionality that requires Zcash transparent protocol types.
-transparent = ["dep:secp256k1", "dep:transparent", "dep:zcash_script"]
+transparent = [
+  "dep:secp256k1",
+  "dep:transparent",
+  "dep:zcash_script",
+  "transparent/transparent-inputs"
+]
 
 ## Enables building a PCZT from the output of `zcash_primitives`'s `Builder::build_for_pczt`.
-zcp-builder = ["dep:zcash_primitives"]
+zcp-builder = ["dep:zcash_primitives", "orchard", "sapling", "transparent"]
 
 #! ### PCZT roles behind feature flags
 #!
@@ -101,10 +118,22 @@ zcp-builder = ["dep:zcash_primitives"]
 #! function.
 
 ## Enables the I/O Finalizer role.
-io-finalizer = ["dep:zcash_primitives", "orchard", "sapling", "transparent"]
+io-finalizer = [
+    "dep:blake2b_simd",
+    "dep:rand_core",
+    "dep:zcash_primitives",
+    "orchard",
+    "sapling",
+    "transparent",
+]
 
 ## Enables the Prover role.
-prover = ["dep:rand_core", "sapling?/temporary-zcashd"]
+prover = [
+    "dep:rand_core",
+    "orchard?/circuit",
+    "sapling?/circuit",
+    "sapling?/temporary-zcashd",
+]
 
 ## Enables the Signer role.
 signer = [
@@ -121,20 +150,28 @@ spend-finalizer = ["transparent"]
 
 ## Enables the Transaction Extractor role.
 tx-extractor = [
+    "dep:blake2b_simd",
     "dep:rand_core",
     "dep:zcash_primitives",
     "orchard",
+    "orchard/circuit",
     "sapling",
+    "sapling/circuit",
     "transparent",
 ]
 
 # Undocumented internal feature flag for enabling features needed for tests.
 internal-tests = [
     "io-finalizer",
+    "orchard",
     "prover",
+    "sapling",
     "signer",
+    "spend-finalizer",
+    "transparent",
     "tx-extractor",
     "zcash_script/signature-validation",
+    "zcp-builder",
 ]
 
 [[test]]

@@ -1,10 +1,7 @@
 //! Support for legacy transparent addresses and scripts.
 
 use core::fmt;
-use core2::io::{self, Read, Write};
-
-use zcash_address::{ToAddress, TryFromAddress, ZcashAddress};
-use zcash_protocol::consensus::NetworkType;
+use corez::io::{self, Read, Write};
 
 use zcash_encoding::Vector;
 use zcash_script::{
@@ -14,7 +11,7 @@ use zcash_script::{
 };
 
 #[cfg(feature = "transparent-inputs")]
-use sha2::{Digest, Sha256};
+use crate::util::hash160;
 
 /// A serialized script, used inside transparent inputs and outputs of a transaction.
 #[derive(Clone)]
@@ -60,16 +57,17 @@ impl PartialEq for Script {
 impl Eq for Script {}
 
 impl Script {
-    pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
-        let script = Vector::read(&mut reader, |r| {
-            let mut bytes = [0; 1];
-            r.read_exact(&mut bytes).map(|_| bytes[0])
-        })?;
+    /// Reads a CompactSize-prefixed script.
+    ///
+    /// Returns an error for an invalid length prefix or a reader failure, including
+    /// [`io::ErrorKind::UnexpectedEof`] if the prefix or script bytes are truncated.
+    pub fn read<R: Read>(reader: R) -> io::Result<Self> {
+        let script = Vector::read_bytes(reader)?;
         Ok(Script(script::Code(script)))
     }
 
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        Vector::write(&mut writer, &self.0.0, |w, e| w.write_all(&[*e]))
+        Vector::write_bytes(&mut writer, &self.0.0)
     }
 
     /// Returns the length of this script as encoded (including the initial CompactSize).
@@ -150,13 +148,20 @@ impl TransparentAddress {
 
     /// Returns the address that this Script contains, if any.
     pub fn from_script_pubkey(script_pubkey: &script::PubKey) -> Option<Self> {
-        solver::standard(script_pubkey).and_then(|script_kind| match script_kind {
+        solver::standard(script_pubkey)
+            .as_ref()
+            .and_then(Self::from_script_kind)
+    }
+
+    /// Returns the address that this `ScriptKind` contains, if any.
+    pub fn from_script_kind(script_kind: &solver::ScriptKind) -> Option<Self> {
+        match script_kind {
             solver::ScriptKind::PubKeyHash { hash } => {
-                Some(TransparentAddress::PublicKeyHash(hash))
+                Some(TransparentAddress::PublicKeyHash(*hash))
             }
-            solver::ScriptKind::ScriptHash { hash } => Some(TransparentAddress::ScriptHash(hash)),
+            solver::ScriptKind::ScriptHash { hash } => Some(TransparentAddress::ScriptHash(*hash)),
             _ => None,
-        })
+        }
     }
 
     /// Generate the `scriptPubKey` corresponding to this address.
@@ -189,37 +194,7 @@ impl TransparentAddress {
     /// Derives the P2PKH transparent address corresponding to the given pubkey bytes.
     #[cfg(feature = "transparent-inputs")]
     pub(crate) fn from_pubkey_bytes(pubkey: &[u8; 33]) -> Self {
-        TransparentAddress::PublicKeyHash(
-            *ripemd::Ripemd160::digest(Sha256::digest(pubkey)).as_ref(),
-        )
-    }
-
-    /// Encodes this transparent address for the given network type.
-    pub fn to_zcash_address(&self, net: NetworkType) -> ZcashAddress {
-        match self {
-            TransparentAddress::PublicKeyHash(data) => {
-                ZcashAddress::from_transparent_p2pkh(net, *data)
-            }
-            TransparentAddress::ScriptHash(data) => ZcashAddress::from_transparent_p2sh(net, *data),
-        }
-    }
-}
-
-impl TryFromAddress for TransparentAddress {
-    type Error = ();
-
-    fn try_from_transparent_p2pkh(
-        _net: NetworkType,
-        data: [u8; 20],
-    ) -> Result<Self, zcash_address::ConversionError<Self::Error>> {
-        Ok(TransparentAddress::PublicKeyHash(data))
-    }
-
-    fn try_from_transparent_p2sh(
-        _net: NetworkType,
-        data: [u8; 20],
-    ) -> Result<Self, zcash_address::ConversionError<Self::Error>> {
-        Ok(TransparentAddress::ScriptHash(data))
+        TransparentAddress::PublicKeyHash(hash160::hash(pubkey))
     }
 }
 

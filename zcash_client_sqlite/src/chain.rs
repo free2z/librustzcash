@@ -12,10 +12,12 @@ use crate::{BlockDb, error::SqliteClientError};
 #[cfg(feature = "unstable")]
 use {
     crate::{BlockHash, FsBlockDb, FsBlockDbError},
-    rusqlite::Connection,
-    std::fs::File,
-    std::io::Read,
-    std::path::{Path, PathBuf},
+    rusqlite::{Connection, OptionalExtension, named_params},
+    std::{
+        fs::File,
+        io::Read,
+        path::{Path, PathBuf},
+    },
 };
 
 pub mod init;
@@ -97,15 +99,21 @@ where
 #[cfg(feature = "unstable")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockMeta {
+    /// The height of the block.
     pub height: BlockHeight,
+    /// The hash of the block.
     pub block_hash: BlockHash,
+    /// The block timestamp as a Unix epoch time.
     pub block_time: u32,
+    /// The number of Sapling outputs in the block.
     pub sapling_outputs_count: u32,
+    /// The number of Orchard actions in the block.
     pub orchard_actions_count: u32,
 }
 
 #[cfg(feature = "unstable")]
 impl BlockMeta {
+    /// Returns the path to this block's file within the given blocks directory.
     pub fn block_file_path<P: AsRef<Path>>(&self, blocks_dir: &P) -> PathBuf {
         blocks_dir.as_ref().join(Path::new(&format!(
             "{}-{}-compactblock",
@@ -120,8 +128,6 @@ pub(crate) fn blockmetadb_insert(
     conn: &Connection,
     block_meta: &[BlockMeta],
 ) -> Result<(), rusqlite::Error> {
-    use rusqlite::named_params;
-
     let mut stmt_insert = conn.prepare(
         "INSERT INTO compactblocks_meta (
             height,
@@ -206,8 +212,6 @@ pub(crate) fn blockmetadb_find_block(
     conn: &Connection,
     height: BlockHeight,
 ) -> Result<Option<BlockMeta>, rusqlite::Error> {
-    use rusqlite::OptionalExtension;
-
     conn.query_row(
         "SELECT blockhash, time, sapling_outputs_count, orchard_actions_count
         FROM compactblocks_meta
@@ -363,6 +367,279 @@ mod tests {
     }
 
     #[test]
+    fn truncate_to_chain_state_sapling() {
+        testing::pool::truncate_to_chain_state::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn truncate_to_chain_state_orchard() {
+        testing::pool::truncate_to_chain_state::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn truncate_to_chain_state_below_birthday_sapling() {
+        testing::pool::truncate_to_chain_state_below_birthday::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn truncate_to_chain_state_below_birthday_orchard() {
+        testing::pool::truncate_to_chain_state_below_birthday::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn truncate_to_chain_state_above_scanned_sapling() {
+        testing::pool::truncate_to_chain_state_above_scanned::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn truncate_to_chain_state_above_scanned_orchard() {
+        testing::pool::truncate_to_chain_state_above_scanned::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn truncate_to_chain_state_commitment_tree_error_sapling() {
+        testing::pool::truncate_to_chain_state_commitment_tree_error::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn truncate_to_chain_state_commitment_tree_error_orchard() {
+        testing::pool::truncate_to_chain_state_commitment_tree_error::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn put_blocks_commitment_tree_conflict_is_a_continuity_error_sapling() {
+        testing::pool::put_blocks_commitment_tree_conflict_is_a_continuity_error::<SaplingPoolTester>(
+        )
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn put_blocks_commitment_tree_conflict_is_a_continuity_error_orchard() {
+        testing::pool::put_blocks_commitment_tree_conflict_is_a_continuity_error::<OrchardPoolTester>(
+        )
+    }
+
+    #[test]
+    fn rewind_to_chain_state_deep_sapling() {
+        testing::pool::rewind_to_chain_state_deep::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn rewind_to_chain_state_deep_orchard() {
+        testing::pool::rewind_to_chain_state_deep::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn rewind_to_chain_state_shallow_sapling() {
+        testing::pool::rewind_to_chain_state_shallow::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn rewind_to_chain_state_shallow_orchard() {
+        testing::pool::rewind_to_chain_state_shallow::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn rewind_after_non_contiguous_scan_sapling() {
+        testing::pool::rewind_after_non_contiguous_scan::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn rewind_after_non_contiguous_scan_orchard() {
+        testing::pool::rewind_after_non_contiguous_scan::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn b_note_stable_across_rewind_below_birthday_sapling() {
+        testing::pool::b_note_stable_across_rewind_below_birthday::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn b_note_stable_across_rewind_below_birthday_orchard() {
+        testing::pool::b_note_stable_across_rewind_below_birthday::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn completed_shard_note_spendable_across_older_birthday_import_sapling() {
+        testing::pool::completed_shard_note_spendable_across_older_birthday_import::<
+            SaplingPoolTester,
+        >()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn completed_shard_note_spendable_across_older_birthday_import_orchard() {
+        testing::pool::completed_shard_note_spendable_across_older_birthday_import::<
+            OrchardPoolTester,
+        >()
+    }
+
+    #[test]
+    fn open_shard_note_spendable_across_older_birthday_import_sapling() {
+        testing::pool::open_shard_note_spendable_across_older_birthday_import::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn open_shard_note_spendable_across_older_birthday_import_orchard() {
+        testing::pool::open_shard_note_spendable_across_older_birthday_import::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn completed_shard_note_spendable_after_rewind_once_window_rescanned_sapling() {
+        testing::pool::completed_shard_note_spendable_after_rewind_once_window_rescanned::<
+            SaplingPoolTester,
+        >()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn completed_shard_note_spendable_after_rewind_once_window_rescanned_orchard() {
+        testing::pool::completed_shard_note_spendable_after_rewind_once_window_rescanned::<
+            OrchardPoolTester,
+        >()
+    }
+
+    #[test]
+    fn stabilized_note_rewind_above_shard_end_sapling() {
+        testing::pool::stabilized_note_rewind_above_shard_end::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn stabilized_note_rewind_above_shard_end_orchard() {
+        testing::pool::stabilized_note_rewind_above_shard_end::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn stabilized_note_rewind_un_mines_shard_completion_sapling() {
+        testing::pool::stabilized_note_rewind_un_mines_shard_completion::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn stabilized_note_rewind_un_mines_shard_completion_orchard() {
+        testing::pool::stabilized_note_rewind_un_mines_shard_completion::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn note_in_recently_completed_shard_spendable_once_confirmed_sapling() {
+        testing::pool::note_in_recently_completed_shard_spendable_once_confirmed::<SaplingPoolTester>(
+        )
+    }
+
+    #[test]
+    fn stabilized_note_spendable_across_small_tip_advance_sapling() {
+        testing::pool::stabilized_note_spendable_across_small_tip_advance::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn note_in_recently_completed_shard_spendable_once_confirmed_orchard() {
+        testing::pool::note_in_recently_completed_shard_spendable_once_confirmed::<OrchardPoolTester>(
+        )
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn stabilized_note_spendable_across_small_tip_advance_orchard() {
+        testing::pool::stabilized_note_spendable_across_small_tip_advance::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn anchor_is_policy_depth_state_or_absent_sapling() {
+        testing::pool::anchor_is_policy_depth_state_or_absent::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn anchor_is_policy_depth_state_or_absent_orchard() {
+        testing::pool::anchor_is_policy_depth_state_or_absent::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn spendable_balance_agrees_with_note_selection_sapling() {
+        testing::pool::spendable_balance_agrees_with_note_selection::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn spendable_balance_agrees_with_note_selection_orchard() {
+        testing::pool::spendable_balance_agrees_with_note_selection::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn shard_completeness_derives_from_scan_queue_sapling() {
+        testing::pool::shard_completeness_derives_from_scan_queue::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn shard_completeness_derives_from_scan_queue_orchard() {
+        testing::pool::shard_completeness_derives_from_scan_queue::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn completed_shard_note_spendable_after_scanning_anchor_window_sapling() {
+        testing::pool::completed_shard_note_spendable_after_scanning_anchor_window::<
+            SaplingPoolTester,
+        >()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn completed_shard_note_spendable_after_scanning_anchor_window_orchard() {
+        testing::pool::completed_shard_note_spendable_after_scanning_anchor_window::<
+            OrchardPoolTester,
+        >()
+    }
+
+    #[test]
+    fn open_shard_note_spendable_across_commitment_free_stretch_sapling() {
+        testing::pool::open_shard_note_spendable_across_commitment_free_stretch::<SaplingPoolTester>(
+        )
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn open_shard_note_spendable_across_commitment_free_stretch_orchard() {
+        testing::pool::open_shard_note_spendable_across_commitment_free_stretch::<OrchardPoolTester>(
+        )
+    }
+
+    #[test]
+    fn completed_shard_note_spendable_with_unscanned_gap_below_it_sapling() {
+        testing::pool::completed_shard_note_spendable_with_unscanned_gap_below_it::<SaplingPoolTester>(
+        )
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn completed_shard_note_spendable_with_unscanned_gap_below_it_orchard() {
+        testing::pool::completed_shard_note_spendable_with_unscanned_gap_below_it::<OrchardPoolTester>(
+        )
+    }
+
+    #[test]
+    fn stabilized_note_settled_height_invalidated_by_reorg_sapling() {
+        testing::pool::stabilized_note_settled_height_invalidated_by_reorg::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn stabilized_note_settled_height_invalidated_by_reorg_orchard() {
+        testing::pool::stabilized_note_settled_height_invalidated_by_reorg::<OrchardPoolTester>()
+    }
+
+    #[test]
     fn reorg_to_checkpoint_sapling() {
         testing::pool::reorg_to_checkpoint::<SaplingPoolTester>()
     }
@@ -415,5 +692,16 @@ mod tests {
     #[cfg(feature = "orchard")]
     fn scan_cached_blocks_detects_spends_out_of_order_orchard() {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<OrchardPoolTester>()
+    }
+
+    #[test]
+    fn reorg_below_scanned_height_is_a_continuity_error_sapling() {
+        testing::pool::reorg_below_scanned_height_is_a_continuity_error::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn reorg_below_scanned_height_is_a_continuity_error_orchard() {
+        testing::pool::reorg_below_scanned_height_is_a_continuity_error::<OrchardPoolTester>()
     }
 }

@@ -3,10 +3,11 @@
 use std::error;
 use std::fmt::{self, Debug, Display};
 
-use crate::scanning::ScanError;
+use crate::{data_api::PutBlocksError, scanning::ScanError};
 
 /// Errors related to chain validation and scanning.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error<WalletError, BlockSourceError> {
     /// An error that was produced by wallet operations in the course of scanning the chain.
     Wallet(WalletError),
@@ -60,5 +61,14 @@ where
 impl<WE, BSE> From<ScanError> for Error<WE, BSE> {
     fn from(e: ScanError) -> Self {
         Error::Scan(e)
+    }
+}
+
+impl<WE, BSE> From<PutBlocksError<WE>> for Error<WE, BSE> {
+    fn from(e: PutBlocksError<WE>) -> Self {
+        match e {
+            PutBlocksError::Continuity(e) => Error::Scan(e),
+            PutBlocksError::Wallet(e) => Error::Wallet(e),
+        }
     }
 }

@@ -2,28 +2,19 @@
 //!
 //! - Creates bindingSig and extracts the final transaction.
 
-use core::marker::PhantomData;
-use rand_core::OsRng;
+use core::{cell::RefCell, marker::PhantomData};
+use rand_core::{CryptoRng, Rng};
 
 use zcash_primitives::transaction::{
-    Authorization, Transaction, TransactionData, TxVersion,
-    sighash::{SignableInput, signature_hash},
-    txid::TxIdDigester,
-};
-#[cfg(all(
-    any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-    feature = "zip-233"
-))]
-use zcash_protocol::value::Zatoshis;
-use zcash_protocol::{
-    consensus::BranchId,
-    constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID},
+    Authorization, Transaction,
+    sighash::{PrecomputedSighashData, SignableInput},
 };
 
-use crate::{Pczt, common::determine_lock_time};
+use crate::Pczt;
 
 mod orchard;
 pub use self::orchard::OrchardError;
+pub type IronwoodError = OrchardError;
 
 mod sapling;
 pub use self::sapling::SaplingError;
@@ -77,7 +68,10 @@ impl<'a> TransactionExtractor<'a> {
     }
 
     /// Attempts to extract a valid transaction from the PCZT.
-    pub fn extract(self) -> Result<Transaction, Error> {
+    ///
+    /// `rng` provides the randomness for the binding signatures and for the batch
+    /// validation of the extracted transaction.
+    pub fn extract<R: Rng + CryptoRng>(self, mut rng: R) -> Result<Transaction, Error> {
         let Self {
             pczt,
             sapling_vk,
@@ -85,78 +79,80 @@ impl<'a> TransactionExtractor<'a> {
             _unused,
         } = self;
 
-        let version = match (pczt.global.tx_version, pczt.global.version_group_id) {
-            (V5_TX_VERSION, V5_VERSION_GROUP_ID) => Ok(TxVersion::V5),
-            (version, version_group_id) => Err(Error::Global(GlobalError::UnsupportedTxVersion {
-                version,
-                version_group_id,
-            })),
-        }?;
-
-        let consensus_branch_id = BranchId::try_from(pczt.global.consensus_branch_id)
-            .map_err(|_| Error::Global(GlobalError::UnknownConsensusBranchId))?;
-
-        let lock_time = determine_lock_time(&pczt.global, &pczt.transparent.inputs)
-            .ok_or(Error::IncompatibleLockTimes)?;
-
-        let transparent_bundle =
-            transparent::extract_bundle(pczt.transparent).map_err(Error::Transparent)?;
-        let sapling_bundle = sapling::extract_bundle(pczt.sapling).map_err(Error::Sapling)?;
-        let orchard_bundle = orchard::extract_bundle(pczt.orchard).map_err(Error::Orchard)?;
-
-        let tx_data = TransactionData::<Unbound>::from_parts(
-            version,
-            consensus_branch_id,
-            lock_time,
-            pczt.global.expiry_height.into(),
-            #[cfg(all(
-                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                feature = "zip-233"
-            ))]
-            Zatoshis::ZERO,
-            transparent_bundle,
-            None,
-            sapling_bundle,
-            orchard_bundle,
-        );
+        let crate::ParsedPczt { tx_data, .. } = pczt.extract_tx_data::<Unbound, Error>(
+            crate::common::AnchorRequirement::Required,
+            |t| {
+                t.extract()
+                    .map_err(|e| Error::Transparent(TransparentError::Extract(e)))
+            },
+            |s| {
+                s.extract()
+                    .map_err(|e| Error::Sapling(SaplingError::Extract(e)))
+            },
+            |o| {
+                o.extract()
+                    .map_err(|e| Error::Orchard(OrchardError::Extract(e)))
+            },
+            |i| {
+                i.extract()
+                    .map_err(|e| Error::Ironwood(IronwoodError::Extract(e)))
+            },
+        )?;
 
         // The commitment being signed is shared across all shielded inputs.
-        let txid_parts = tx_data.digest(TxIdDigester);
-        let shielded_sighash = signature_hash(&tx_data, &SignableInput::Shielded, &txid_parts);
+        let sighash_data = PrecomputedSighashData::new(tx_data);
+        let shielded_sighash = sighash_data.signature_hash(&SignableInput::Shielded);
+        let tx_data = sighash_data.into_tx();
 
-        // Create the binding signatures.
+        // Create the binding signatures. The bundle mappers each need the RNG, and
+        // `try_map_bundles` calls them one at a time.
+        let binding_rng = RefCell::new(&mut rng);
         let tx_data = tx_data.try_map_bundles(
             |t| Ok(t.map(|t| t.map_authorization(transparent::RemoveInputInfo))),
             |s| {
                 s.map(|s| {
-                    s.apply_binding_signature(*shielded_sighash.as_ref(), OsRng)
-                        .ok_or(Error::SighashMismatch)
+                    s.apply_binding_signature(
+                        *shielded_sighash.as_ref(),
+                        &mut **binding_rng.borrow_mut(),
+                    )
+                    .ok_or(Error::SighashMismatch)
                 })
                 .transpose()
             },
             |o| {
                 o.map(|o| {
-                    o.apply_binding_signature(*shielded_sighash.as_ref(), OsRng)
-                        .ok_or(Error::SighashMismatch)
+                    o.apply_binding_signature(
+                        *shielded_sighash.as_ref(),
+                        &mut **binding_rng.borrow_mut(),
+                    )
+                    .ok_or(Error::SighashMismatch)
                 })
                 .transpose()
             },
-            #[cfg(zcash_unstable = "zfuture")]
-            |_| unimplemented!("PCZT support for TZEs is not implemented."),
         )?;
 
-        let tx = tx_data.freeze().expect("v5 tx can't fail here");
+        let tx = tx_data.freeze().expect("txid construction can't fail here");
 
         // Now that we have a supposedly fully-authorized transaction, verify it.
         if let Some(bundle) = tx.sapling_bundle() {
             let (spend_vk, output_vk) = sapling_vk.ok_or(Error::SaplingRequired)?;
 
-            sapling::verify_bundle(bundle, spend_vk, output_vk, *shielded_sighash.as_ref())
-                .map_err(Error::Sapling)?;
+            sapling::verify_bundle(
+                &mut rng,
+                bundle,
+                spend_vk,
+                output_vk,
+                *shielded_sighash.as_ref(),
+            )
+            .map_err(Error::Sapling)?;
         }
         if let Some(bundle) = tx.orchard_bundle() {
-            orchard::verify_bundle(bundle, orchard_vk, *shielded_sighash.as_ref())
+            orchard::verify_bundle(&mut rng, bundle, orchard_vk, *shielded_sighash.as_ref())
                 .map_err(Error::Orchard)?;
+        }
+        if let Some(bundle) = tx.ironwood_bundle() {
+            orchard::verify_bundle(&mut rng, bundle, orchard_vk, *shielded_sighash.as_ref())
+                .map_err(Error::Ironwood)?;
         }
 
         Ok(tx)
@@ -169,15 +165,13 @@ impl Authorization for Unbound {
     type TransparentAuth = ::transparent::pczt::Unbound;
     type SaplingAuth = ::sapling::pczt::Unbound;
     type OrchardAuth = ::orchard::pczt::Unbound;
-    #[cfg(zcash_unstable = "zfuture")]
-    type TzeAuth = core::convert::Infallible;
 }
 
 /// Errors that can occur while extracting a transaction from a PCZT.
 #[derive(Debug)]
 pub enum Error {
-    Global(GlobalError),
-    IncompatibleLockTimes,
+    Extract(crate::ExtractError),
+    Ironwood(IronwoodError),
     Orchard(OrchardError),
     Sapling(SaplingError),
     SaplingRequired,
@@ -185,8 +179,8 @@ pub enum Error {
     Transparent(TransparentError),
 }
 
-#[derive(Debug)]
-pub enum GlobalError {
-    UnknownConsensusBranchId,
-    UnsupportedTxVersion { version: u32, version_group_id: u32 },
+impl From<crate::ExtractError> for Error {
+    fn from(e: crate::ExtractError) -> Self {
+        Error::Extract(e)
+    }
 }

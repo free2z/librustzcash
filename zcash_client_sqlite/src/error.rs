@@ -2,19 +2,28 @@
 
 use std::error;
 use std::fmt;
+use std::ops::Range;
 
+#[cfg(feature = "orchard")]
+use incrementalmerkletree::Position;
 use nonempty::NonEmpty;
+#[cfg(feature = "orchard")]
+use shardtree::error::InsertionError;
 use shardtree::error::ShardTreeError;
 
 #[cfg(feature = "transparent-key-import")]
 use uuid::Uuid;
 use zcash_address::ParseError;
 use zcash_client_backend::data_api::NoteFilter;
+use zcash_client_backend::data_api::PutBlocksError as WalletPutBlocksError;
+use zcash_client_backend::data_api::error::RewindError;
 use zcash_client_backend::data_api::ll;
 use zcash_client_backend::data_api::ll::wallet::PutBlocksError;
+use zcash_client_backend::wallet::OutputRef;
 use zcash_keys::address::UnifiedAddress;
+use zcash_keys::encoding::UnifiedEncodingError;
 use zcash_keys::keys::AddressGenerationError;
-use zcash_protocol::{PoolType, TxId, consensus::BlockHeight, value::BalanceError};
+use zcash_protocol::{PoolType, ShieldedPool, TxId, consensus::BlockHeight, value::BalanceError};
 use zip32::DiversifierIndex;
 
 use crate::{
@@ -33,9 +42,19 @@ use {
 
 /// The primary error type for the SQLite wallet backend.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SqliteClientError {
     /// Decoding of a stored value from its serialized form has failed.
     CorruptedData(String),
+
+    /// A note commitment tree retains checkpoints both above and below a requested truncation
+    /// height, but has no checkpoint at that height.
+    DivergedCheckpoints {
+        /// The shielded pool whose note commitment tree has diverged checkpoints.
+        pool: ShieldedPool,
+        /// The requested truncation height missing from the tree's checkpoints.
+        height: BlockHeight,
+    },
 
     /// An error occurred decoding a protobuf message.
     Protobuf(prost::DecodeError),
@@ -78,18 +97,34 @@ pub enum SqliteClientError {
     /// this error is (safe rewind height, requested height). If no safe rewind height can be
     /// determined, the safe rewind height member will be `None`.
     RequestedRewindInvalid {
+        /// The height to which it is possible to safely rewind, or `None` if no safe
+        /// rewind height could be determined.
         safe_rewind_height: Option<BlockHeight>,
+        /// The block height that was requested for the rewind.
         requested_height: BlockHeight,
+    },
+
+    /// A request to prune the scan queue named a height above the wallet birthday. Blocks at or
+    /// above the wallet birthday may hold an account's notes, or the note commitments that the
+    /// witnesses for those notes require, so the scan queue must keep them.
+    PruneAboveWalletBirthday {
+        /// The height below which the caller asked to prune the scan queue.
+        requested_height: BlockHeight,
+        /// The wallet birthday: the lowest birthday of any account in the wallet.
+        wallet_birthday: BlockHeight,
     },
 
     /// An error occurred in generating a Zcash address.
     AddressGeneration(AddressGenerationError),
 
+    /// A unified address or viewing key could not be encoded for storage.
+    UnifiedEncoding(UnifiedEncodingError),
+
     /// The account for which information was requested does not belong to the wallet.
     AccountUnknown,
 
     /// The account being added collides with an existing account in the wallet with the given ID.
-    /// The collision can be on the seed and ZIP-32 account index, or a shared FVK component.
+    /// The collision can be on the seed and ZIP-32 account index, or a shared IVK component.
     AccountCollision(AccountUuid),
 
     /// The account was imported, and ZIP-32 derivation information is not known for it.
@@ -112,6 +147,66 @@ pub enum SqliteClientError {
     /// An error occurred in inserting data into or accessing data from one of the wallet's note
     /// commitment trees.
     CommitmentTree(ShardTreeError<commitment_tree::Error>),
+
+    /// An error occurred while inserting the note commitment data for a range of scanned blocks
+    /// into one of the wallet's note commitment trees during a `put_blocks` operation. The `pool`
+    /// and `block_range` fields record the shielded pool whose note commitment tree was being
+    /// updated and the range of block heights (start-inclusive, end-exclusive) that were being
+    /// added to the wallet when the error occurred.
+    PutBlocksCommitmentTree {
+        /// The shielded pool whose note commitment tree was being updated when the error occurred.
+        pool: ShieldedPool,
+        /// The range of block heights that were being added to the wallet when the error
+        /// occurred.
+        block_range: Range<BlockHeight>,
+        /// The underlying note commitment tree error.
+        error: ShardTreeError<commitment_tree::Error>,
+    },
+
+    /// An error occurred in one of the wallet's note commitment trees while truncating the wallet
+    /// to the specified block height. The `pool` and `height` fields record the shielded pool
+    /// whose note commitment tree was being updated and the block height that the wallet was being
+    /// truncated to when the error occurred.
+    TruncateCommitmentTree {
+        /// The shielded pool whose note commitment tree was being updated when the error occurred.
+        pool: ShieldedPool,
+        /// The block height that the wallet was being truncated to when the error occurred.
+        height: BlockHeight,
+        /// The underlying note commitment tree error.
+        error: ShardTreeError<commitment_tree::Error>,
+    },
+
+    /// The caller-supplied frontier passed to an Orchard or Ironwood
+    /// historical witness generation helper is inconsistent with the shard
+    /// data reconstructed from the wallet at the requested height.
+    ///
+    /// [`WalletDb::generate_orchard_witnesses_at_historical_height`]:
+    /// crate::WalletDb::generate_orchard_witnesses_at_historical_height
+    /// [`WalletDb::generate_ironwood_witnesses_at_historical_height`]:
+    /// crate::WalletDb::generate_ironwood_witnesses_at_historical_height
+    #[cfg(feature = "orchard")]
+    HistoricalFrontierInvalid(InsertionError),
+
+    /// A witness could not be generated for the specified position at the
+    /// specified historical height in a call to an Orchard or Ironwood
+    /// historical witness generation helper.
+    ///
+    /// The wallet most likely has not synced through `height`, the checkpoint
+    /// at `height` has been pruned, or `position` does not belong to the
+    /// wallet.
+    ///
+    /// [`WalletDb::generate_orchard_witnesses_at_historical_height`]:
+    /// crate::WalletDb::generate_orchard_witnesses_at_historical_height
+    /// [`WalletDb::generate_ironwood_witnesses_at_historical_height`]:
+    /// crate::WalletDb::generate_ironwood_witnesses_at_historical_height
+    #[cfg(feature = "orchard")]
+    HistoricalWitnessUnavailable {
+        /// The note commitment tree position for which a witness was
+        /// requested.
+        position: Position,
+        /// The historical height at which the witness was requested.
+        height: BlockHeight,
+    },
 
     /// The block at the specified height was not available from the block cache.
     CacheMiss(BlockHeight),
@@ -164,17 +259,56 @@ pub enum SqliteClientError {
     /// [`TransactionsInvolvingAddress`]: zcash_client_backend::data_api::TransactionsInvolvingAddress
     #[cfg(feature = "transparent-inputs")]
     NotificationMismatch {
+        /// The expected ending block height.
         expected: BlockHeight,
+        /// The actual ending block height returned.
         actual: BlockHeight,
     },
 
-    #[cfg(feature = "transparent-inputs")]
-    GapAddresses,
-
-    /// An attempt to import a transparent pubkey failed because that pubkey had already been
+    /// An attempt to import a standalone transparent address failed because it had already been
     /// imported to a different account.
     #[cfg(feature = "transparent-key-import")]
-    PubkeyImportConflict(Uuid),
+    StandaloneImportConflict(Uuid),
+
+    /// An error returned by a [`FeeRule`] during transparent input selection. The underlying
+    /// error is boxed so the storage layer does not need to know every fee rule's error type.
+    ///
+    /// [`FeeRule`]: zcash_primitives::transaction::fees::FeeRule
+    #[cfg(feature = "transparent-inputs")]
+    FeeRuleError(Box<dyn error::Error + Send + Sync>),
+
+    /// A `zcash_client_backend` error value carried a variant that this crate has no
+    /// translation for; the wrapped value carries the error itself.
+    ///
+    /// Those error types are `#[non_exhaustive]`, so a variant introduced by a future
+    /// `zcash_client_backend` release can reach this crate before there is a specific
+    /// [`SqliteClientError`] counterpart for it. This error is therefore unreachable with
+    /// the `zcash_client_backend` release this crate is built against; encountering it
+    /// means this crate needs updating to translate the new variant.
+    BackendError(BackendError),
+}
+
+/// A `zcash_client_backend` error carrying a variant that this crate has no translation for,
+/// as reported by [`SqliteClientError::BackendError`].
+///
+/// Each variant names the operation whose error type is wrapped. The errors are boxed because
+/// both are generic over [`SqliteClientError`] itself.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum BackendError {
+    /// An error reported while inserting scanned blocks into the wallet.
+    PutBlocks(Box<PutBlocksError<SqliteClientError, commitment_tree::Error>>),
+    /// An error reported while rewinding the wallet to a previous chain state.
+    Rewind(Box<RewindError<AccountUuid, SqliteClientError>>),
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            BackendError::PutBlocks(_) => write!(f, "block insertion"),
+            BackendError::Rewind(_) => write!(f, "rewind to a previous chain state"),
+        }
+    }
 }
 
 impl error::Error for SqliteClientError {
@@ -185,6 +319,11 @@ impl error::Error for SqliteClientError {
             SqliteClientError::Io(e) => Some(e),
             SqliteClientError::BalanceError(e) => Some(e),
             SqliteClientError::AddressGeneration(e) => Some(e),
+            SqliteClientError::UnifiedEncoding(e) => Some(e),
+            #[cfg(feature = "orchard")]
+            SqliteClientError::HistoricalFrontierInvalid(e) => Some(e),
+            #[cfg(feature = "transparent-inputs")]
+            SqliteClientError::FeeRuleError(e) => Some(&**e),
             _ => None,
         }
     }
@@ -207,6 +346,10 @@ impl fmt::Display for SqliteClientError {
             SqliteClientError::CorruptedData(reason) => {
                 write!(f, "Data DB is corrupted: {reason}")
             }
+            SqliteClientError::DivergedCheckpoints { pool, height } => write!(
+                f,
+                "Data DB is corrupted: the {pool:?} note commitment tree retains checkpoints both above and below height {height}, but none at that height to truncate to"
+            ),
             SqliteClientError::Protobuf(e) => {
                 write!(f, "Failed to parse protobuf-encoded record: {e}")
             }
@@ -219,6 +362,13 @@ impl fmt::Display for SqliteClientError {
                 "A rewind for your wallet may only target height {} or greater; the requested height was {}.",
                 safe_rewind_height.map_or("<unavailable>".to_owned(), |h0| format!("{h0}")),
                 requested_height
+            ),
+            SqliteClientError::PruneAboveWalletBirthday {
+                requested_height,
+                wallet_birthday,
+            } => write!(
+                f,
+                "The scan queue may only be pruned below the wallet birthday {wallet_birthday}; the requested height was {requested_height}."
             ),
             SqliteClientError::DecodingError(e) => write!(f, "{e}"),
             #[cfg(feature = "transparent-inputs")]
@@ -239,6 +389,7 @@ impl fmt::Display for SqliteClientError {
                 "`put_blocks` requires that the provided block range be sequential"
             ),
             SqliteClientError::AddressGeneration(e) => write!(f, "{e}"),
+            SqliteClientError::UnifiedEncoding(e) => write!(f, "{e}"),
             SqliteClientError::AccountUnknown => write!(
                 f,
                 "The account with the given ID does not belong to this wallet."
@@ -269,6 +420,36 @@ impl fmt::Display for SqliteClientError {
             SqliteClientError::CommitmentTree(err) => write!(
                 f,
                 "An error occurred accessing or updating note commitment tree data: {err}."
+            ),
+            SqliteClientError::PutBlocksCommitmentTree {
+                pool,
+                block_range,
+                error,
+            } => write!(
+                f,
+                "An error occurred updating the {pool:?} note commitment tree while adding blocks in the range {}..{}: {error}.",
+                u32::from(block_range.start),
+                u32::from(block_range.end),
+            ),
+            SqliteClientError::TruncateCommitmentTree {
+                pool,
+                height,
+                error,
+            } => write!(
+                f,
+                "An error occurred updating the {pool:?} note commitment tree while truncating the wallet to height {}: {error}.",
+                u32::from(*height),
+            ),
+            #[cfg(feature = "orchard")]
+            SqliteClientError::HistoricalFrontierInvalid(err) => write!(
+                f,
+                "The frontier supplied to historical witness generation is inconsistent with the wallet's shard data: {err}"
+            ),
+            #[cfg(feature = "orchard")]
+            SqliteClientError::HistoricalWitnessUnavailable { position, height } => write!(
+                f,
+                "No witness is available for position {} at height {height} (the wallet may need to sync through this height).",
+                u64::from(*position),
             ),
             SqliteClientError::CacheMiss(height) => write!(
                 f,
@@ -303,13 +484,6 @@ impl fmt::Display for SqliteClientError {
                     u128::from(*i)
                 )
             }
-            #[cfg(feature = "transparent-inputs")]
-            SqliteClientError::GapAddresses => {
-                write!(
-                    f,
-                    "An error occured while generating a transparent gap addresses"
-                )
-            }
             SqliteClientError::AddressReuse(address_str, txids) => {
                 write!(
                     f,
@@ -334,12 +508,19 @@ impl fmt::Display for SqliteClientError {
                 )
             }
             #[cfg(feature = "transparent-key-import")]
-            SqliteClientError::PubkeyImportConflict(uuid) => {
+            SqliteClientError::StandaloneImportConflict(uuid) => {
                 write!(
                     f,
-                    "The given transparent pubkey is already managed by account {uuid}"
+                    "The given standalone transparent address is already managed by account {uuid}"
                 )
             }
+            #[cfg(feature = "transparent-inputs")]
+            SqliteClientError::FeeRuleError(e) => write!(f, "Fee rule error: {e}"),
+            SqliteClientError::BackendError(e) => write!(
+                f,
+                "The zcash_client_backend error reported for {e} is not one this version of \
+                 zcash_client_sqlite recognizes; this crate must be updated to handle it."
+            ),
         }
     }
 }
@@ -399,9 +580,38 @@ impl From<BalanceError> for SqliteClientError {
     }
 }
 
+impl From<UnifiedEncodingError> for SqliteClientError {
+    fn from(e: UnifiedEncodingError) -> Self {
+        SqliteClientError::UnifiedEncoding(e)
+    }
+}
+
 impl From<AddressGenerationError> for SqliteClientError {
     fn from(e: AddressGenerationError) -> Self {
         SqliteClientError::AddressGeneration(e)
+    }
+}
+
+/// `zip317::FeeError` does not implement `std::error::Error`, so we wrap it in order to box
+/// it as the payload of [`SqliteClientError::FeeRuleError`].
+#[cfg(feature = "transparent-inputs")]
+#[derive(Debug)]
+struct FeeErrorWrapper(zcash_primitives::transaction::fees::zip317::FeeError);
+
+#[cfg(feature = "transparent-inputs")]
+impl fmt::Display for FeeErrorWrapper {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+#[cfg(feature = "transparent-inputs")]
+impl error::Error for FeeErrorWrapper {}
+
+#[cfg(feature = "transparent-inputs")]
+impl From<zcash_primitives::transaction::fees::zip317::FeeError> for SqliteClientError {
+    fn from(e: zcash_primitives::transaction::fees::zip317::FeeError) -> Self {
+        SqliteClientError::FeeRuleError(Box::new(FeeErrorWrapper(e)))
     }
 }
 
@@ -420,8 +630,22 @@ impl From<PutBlocksError<SqliteClientError, commitment_tree::Error>> for SqliteC
             }
             ll::wallet::PutBlocksError::Storage(e) => e,
             ll::wallet::PutBlocksError::ShardTree(e) => SqliteClientError::from(e),
+            ll::wallet::PutBlocksError::ShardTreeForBlockRange {
+                pool,
+                block_range,
+                error,
+            } => SqliteClientError::PutBlocksCommitmentTree {
+                pool,
+                block_range,
+                error,
+            },
             #[cfg(feature = "transparent-inputs")]
             ll::wallet::PutBlocksError::GapAddresses(e) => SqliteClientError::from(e),
+            // `WalletWrite::put_blocks` reports `Continuity` through its own error type, so that
+            // variant reaches this conversion only from other callers. `PutBlocksError` is
+            // `#[non_exhaustive]`, so a variant that a future `zcash_client_backend` release adds
+            // also reaches this arm. Both are reported unclassified rather than lost.
+            other => SqliteClientError::BackendError(BackendError::PutBlocks(Box::new(other))),
         }
     }
 }
@@ -429,5 +653,59 @@ impl From<PutBlocksError<SqliteClientError, commitment_tree::Error>> for SqliteC
 impl ErrUnsupportedPool for SqliteClientError {
     fn unsupported_pool_type(pool_type: PoolType) -> Self {
         SqliteClientError::UnsupportedPoolType(pool_type)
+    }
+}
+
+/// A local LockError type for which we can write a From<rusqlite::Error> impl.
+pub(crate) enum LockError {
+    /// Wrapper for storage errors.
+    Storage(rusqlite::Error),
+    /// The wrapped output reference was not found, or the output it refers to was already locked.
+    LockFailure(OutputRef),
+}
+
+impl From<rusqlite::Error> for LockError {
+    fn from(value: rusqlite::Error) -> Self {
+        LockError::Storage(value)
+    }
+}
+
+impl From<LockError> for zcash_client_backend::data_api::error::LockError<SqliteClientError> {
+    fn from(value: LockError) -> Self {
+        match value {
+            LockError::Storage(error) => zcash_client_backend::data_api::error::LockError::Storage(
+                SqliteClientError::from(error),
+            ),
+            LockError::LockFailure(output) => {
+                zcash_client_backend::data_api::error::LockError::LockFailure(output)
+            }
+        }
+    }
+}
+
+/// Carries the outcome of `WalletWrite::put_blocks` through `WalletDb::transactionally`, which
+/// also needs somewhere to report the transaction's own failure to begin or commit.
+pub(crate) enum PutBlocksTransactionError {
+    /// The batch was rejected or could not be persisted.
+    Batch(WalletPutBlocksError<SqliteClientError>),
+    /// The enclosing transaction could not be begun or committed.
+    Transaction(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for PutBlocksTransactionError {
+    fn from(e: rusqlite::Error) -> Self {
+        PutBlocksTransactionError::Transaction(e)
+    }
+}
+
+impl PutBlocksTransactionError {
+    /// Folds a transaction failure into the batch error's wallet-error case.
+    pub(crate) fn into_put_blocks_error(self) -> WalletPutBlocksError<SqliteClientError> {
+        match self {
+            PutBlocksTransactionError::Batch(e) => e,
+            PutBlocksTransactionError::Transaction(e) => {
+                WalletPutBlocksError::Wallet(SqliteClientError::from(e))
+            }
+        }
     }
 }

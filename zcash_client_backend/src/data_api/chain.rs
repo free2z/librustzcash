@@ -159,9 +159,12 @@ use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{self, BlockHeight};
 
 use crate::{
-    data_api::{NullifierQuery, WalletWrite},
+    data_api::WalletWrite,
     proto::compact_formats::CompactBlock,
-    scanning::{BatchRunners, Nullifiers, ScanningKeys, scan_block_with_runners},
+    scanning::{
+        ScanBlockError, ScanningKeys, SpendIdentifiers,
+        compact::{BatchRunners, scan_block_with_runners},
+    },
 };
 
 #[cfg(feature = "sync")]
@@ -324,7 +327,7 @@ pub trait BlockSource {
 ///        BlockHeight::from_u32(1)..BlockHeight::from_u32(3),
 ///        ScanPriority::Historic,
 ///    );
-/// #    let extsk = sapling::zip32::ExtendedSpendingKey::master(&[]);
+/// #    let extsk = sapling::zip32::ExtendedSpendingKey::master(&[]).expect("the derivation path yields a valid key");
 /// #    let dfvk = extsk.to_diversifiable_full_viewing_key();
 /// #    let compact_block1 = zcash_client_backend::scanning::testing::fake_compact_block(
 /// #        1u32.into(),
@@ -507,6 +510,11 @@ pub struct ChainState {
     #[cfg(feature = "orchard")]
     final_orchard_tree:
         Frontier<orchard::tree::MerkleHashOrchard, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }>,
+    // The Ironwood note commitment tree is Orchard-shaped, but Ironwood is a distinct pool with
+    // its own tree, tracked separately from Orchard.
+    #[cfg(feature = "orchard")]
+    final_ironwood_tree:
+        Frontier<orchard::tree::MerkleHashOrchard, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }>,
 }
 
 impl ChainState {
@@ -518,6 +526,8 @@ impl ChainState {
             final_sapling_tree: Frontier::empty(),
             #[cfg(feature = "orchard")]
             final_orchard_tree: Frontier::empty(),
+            #[cfg(feature = "orchard")]
+            final_ironwood_tree: Frontier::empty(),
         }
     }
 
@@ -530,6 +540,10 @@ impl ChainState {
             orchard::tree::MerkleHashOrchard,
             { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
         >,
+        #[cfg(feature = "orchard")] final_ironwood_tree: Frontier<
+            orchard::tree::MerkleHashOrchard,
+            { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+        >,
     ) -> Self {
         Self {
             block_height,
@@ -537,6 +551,8 @@ impl ChainState {
             final_sapling_tree,
             #[cfg(feature = "orchard")]
             final_orchard_tree,
+            #[cfg(feature = "orchard")]
+            final_ironwood_tree,
         }
     }
 
@@ -567,6 +583,16 @@ impl ChainState {
     {
         &self.final_orchard_tree
     }
+
+    /// Returns the frontier of the Ironwood note commitment tree as of the end of the block at
+    /// [`Self::block_height`].
+    #[cfg(feature = "orchard")]
+    pub fn final_ironwood_tree(
+        &self,
+    ) -> &Frontier<orchard::tree::MerkleHashOrchard, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }>
+    {
+        &self.final_ironwood_tree
+    }
 }
 
 /// Scans at most `limit` blocks from the provided block source in order to find transactions
@@ -574,6 +600,18 @@ impl ChainState {
 ///
 /// This function will return after scanning at most `limit` new blocks, to enable the caller to
 /// update their UI with scanning progress.
+///
+/// ## Errors
+///
+/// - [`Error::BlockSource`] if the requested blocks cannot be read from `block_source`.
+/// - [`Error::Scan`] if a scanned block violates chain-continuity rules, or if the scanned note
+///   commitment data (or `from_state`) conflicts with the wallet's note commitment tree(s). The
+///   latter is reported by [`WalletWrite::put_blocks`] as
+///   [`PutBlocksError::Continuity`](crate::data_api::PutBlocksError::Continuity) and is a
+///   continuity error at the first block of the batch.
+/// - [`Error::Wallet`] if a wallet-database operation fails. This covers reading the tracked
+///   viewing keys, block metadata, and nullifiers, as well as persisting the scanned blocks via
+///   [`WalletWrite::put_blocks`].
 ///
 /// ## Panics
 ///
@@ -587,12 +625,12 @@ pub fn scan_cached_blocks<ParamsT, DbT, BlockSourceT>(
     from_height: BlockHeight,
     from_state: &ChainState,
     limit: usize,
-) -> Result<ScanSummary, Error<DbT::Error, BlockSourceT::Error>>
+) -> Result<ScanSummary, Error<<DbT as WalletRead>::Error, BlockSourceT::Error>>
 where
     ParamsT: consensus::Parameters + Send + 'static,
     BlockSourceT: BlockSource,
     DbT: WalletWrite,
-    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + 'static,
+    <DbT as WalletRead>::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
 {
     assert_eq!(from_height, from_state.block_height + 1);
 
@@ -601,11 +639,13 @@ where
         .get_unified_full_viewing_keys()
         .map_err(Error::Wallet)?;
     let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
-    let mut runners = BatchRunners::<_, (), ()>::for_keys(100, &scanning_keys);
+    let mut runners = BatchRunners::<_, (), (), ()>::for_keys(100, &scanning_keys);
 
-    block_source.with_blocks::<_, DbT::Error>(Some(from_height), Some(limit), |block| {
-        runners.add_block(params, block).map_err(|e| e.into())
-    })?;
+    block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
+        Some(from_height),
+        Some(limit),
+        |block| runners.add_block(params, block).map_err(|e| e.into()),
+    )?;
     runners.flush();
 
     let mut prior_block_metadata = if from_height > BlockHeight::from(0) {
@@ -616,33 +656,40 @@ where
         None
     };
 
-    // Get the nullifiers for the unspent notes we are tracking
-    let mut nullifiers = Nullifiers::new(
-        data_db
-            .get_sapling_nullifiers(NullifierQuery::Unspent)
-            .map_err(Error::Wallet)?,
-        #[cfg(feature = "orchard")]
-        data_db
-            .get_orchard_nullifiers(NullifierQuery::Unspent)
-            .map_err(Error::Wallet)?,
-    );
+    // Get the spend identifiers for the unspent outputs we are tracking.
+    let mut spend_ids = SpendIdentifiers::unspent(data_db).map_err(Error::Wallet)?;
+
+    // Nothing writes to the wallet until the whole batch has been scanned, so the wallet's set
+    // of transparent receivers is fixed for the duration of the scan and is resolved against a
+    // single snapshot rather than by a query per transparent output.
+    #[cfg(feature = "transparent-inputs")]
+    let transparent_receivers = data_db
+        .get_transparent_receiver_accounts()
+        .map_err(Error::Wallet)?;
 
     let mut scanned_blocks = vec![];
     let mut scan_summary = ScanSummary::for_range(from_height..from_height);
-    block_source.with_blocks::<_, DbT::Error>(
+    block_source.with_blocks::<_, <DbT as WalletRead>::Error>(
         Some(from_height),
         Some(limit),
         |block: CompactBlock| {
             scan_summary.scanned_range.end = block.height() + 1;
-            let scanned_block = scan_block_with_runners::<_, _, _, (), ()>(
+            let scanned_block = scan_block_with_runners::<_, _, _, (), (), (), _>(
                 params,
                 block,
                 &scanning_keys,
-                &nullifiers,
+                &spend_ids,
                 prior_block_metadata.as_ref(),
                 Some(&mut runners),
+                #[cfg(feature = "transparent-inputs")]
+                |address| {
+                    Ok::<_, <DbT as WalletRead>::Error>(transparent_receivers.get(address).copied())
+                },
             )
-            .map_err(Error::Scan)?;
+            .map_err(|e| match e {
+                ScanBlockError::Scan(e) => Error::Scan(e),
+                ScanBlockError::AddressLookup(e) => Error::Wallet(e),
+            })?;
 
             for wtx in &scanned_block.transactions {
                 scan_summary.spent_sapling_note_count += wtx.sapling_spends().len();
@@ -654,34 +701,7 @@ where
                 }
             }
 
-            let sapling_spent_nf: Vec<&sapling::Nullifier> = scanned_block
-                .transactions
-                .iter()
-                .flat_map(|tx| tx.sapling_spends().iter().map(|spend| spend.nf()))
-                .collect();
-            nullifiers.retain_sapling(|(_, nf)| !sapling_spent_nf.contains(&nf));
-            nullifiers.extend_sapling(scanned_block.transactions.iter().flat_map(|tx| {
-                tx.sapling_outputs()
-                    .iter()
-                    .flat_map(|out| out.nf().into_iter().map(|nf| (*out.account_id(), *nf)))
-            }));
-
-            #[cfg(feature = "orchard")]
-            {
-                let orchard_spent_nf: Vec<&orchard::note::Nullifier> = scanned_block
-                    .transactions
-                    .iter()
-                    .flat_map(|tx| tx.orchard_spends().iter().map(|spend| spend.nf()))
-                    .collect();
-
-                nullifiers.retain_orchard(|(_, nf)| !orchard_spent_nf.contains(&nf));
-                nullifiers.extend_orchard(scanned_block.transactions.iter().flat_map(|tx| {
-                    tx.orchard_outputs()
-                        .iter()
-                        .flat_map(|out| out.nf().into_iter().map(|nf| (*out.account_id(), *nf)))
-                }));
-            }
-
+            spend_ids.update_with(&scanned_block);
             prior_block_metadata = Some(scanned_block.to_block_metadata());
             scanned_blocks.push(scanned_block);
 
@@ -689,9 +709,7 @@ where
         },
     )?;
 
-    data_db
-        .put_blocks(from_state, scanned_blocks)
-        .map_err(Error::Wallet)?;
+    data_db.put_blocks(from_state, scanned_blocks)?;
     Ok(scan_summary)
 }
 

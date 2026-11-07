@@ -29,10 +29,21 @@ use {
         sighash::{SIGHASH_ALL, SighashType},
     },
     core::iter,
-    sha2::Digest,
     zcash_encoding::CompactSize,
     zcash_script::{pattern::push_script, pv, solver},
 };
+
+/// Maximum size of a DER-encoded ECDSA signature (72 bytes) plus one SIGHASH type byte.
+#[cfg(feature = "transparent-inputs")]
+const MAX_SIG_SIZE: usize = 72 + 1;
+
+/// Size of a serialized outpoint: transaction hash (32 bytes) + output index (4 bytes).
+#[cfg(feature = "transparent-inputs")]
+const PREVOUT_SIZE: usize = 32 + 4;
+
+/// Size of a serialized sequence number (u32).
+#[cfg(feature = "transparent-inputs")]
+const SEQUENCE_SIZE: usize = 4;
 
 #[cfg(not(feature = "transparent-inputs"))]
 use zcash_script::Opcode;
@@ -43,7 +54,8 @@ pub enum Error {
     UnsupportedScript,
     InvalidAddress,
     InvalidAmount,
-    /// A bundle could not be built because a required signing keys was missing.
+    /// A bundle could not be built because a required signing key was missing, or
+    /// insufficient keys were provided to meet a multisig threshold.
     MissingSigningKey,
     /// Provided null data is longer than the maximum supported length.
     NullDataTooLong {
@@ -75,8 +87,7 @@ impl fmt::Display for Error {
             Error::MissingSigningKey => write!(f, "Missing signing key"),
             Error::NullDataTooLong { actual, limit } => write!(
                 f,
-                "Provided null data is longer than the maximum supported length (actual: {}, limit: {})",
-                actual, limit
+                "Provided null data is longer than the maximum supported length (actual: {actual}, limit: {limit})"
             ),
             Error::InputCountMismatch => write!(
                 f,
@@ -84,8 +95,7 @@ impl fmt::Display for Error {
             ),
             Error::InvalidExternalSignature { sig_index } => write!(
                 f,
-                "A provided external signature at index {} was not valid for any transparent input",
-                sig_index
+                "A provided external signature at index {sig_index} was not valid for any transparent input"
             ),
             Error::DuplicateSignature => write!(
                 f,
@@ -107,8 +117,6 @@ impl core::error::Error for Error {}
 /// stored in this set and used to authorize transactions with transparent inputs.
 pub struct TransparentSigningSet {
     #[cfg(feature = "transparent-inputs")]
-    secp: secp256k1::Secp256k1<secp256k1::SignOnly>,
-    #[cfg(feature = "transparent-inputs")]
     keys: Vec<(secp256k1::SecretKey, secp256k1::PublicKey)>,
 }
 
@@ -123,8 +131,6 @@ impl TransparentSigningSet {
     pub fn new() -> Self {
         Self {
             #[cfg(feature = "transparent-inputs")]
-            secp: secp256k1::Secp256k1::gen_new(),
-            #[cfg(feature = "transparent-inputs")]
             keys: vec![],
         }
     }
@@ -134,7 +140,7 @@ impl TransparentSigningSet {
     /// Returns the corresponding pubkey.
     #[cfg(feature = "transparent-inputs")]
     pub fn add_key(&mut self, sk: secp256k1::SecretKey) -> secp256k1::PublicKey {
-        let pubkey = secp256k1::PublicKey::from_secret_key(&self.secp, &sk);
+        let pubkey = secp256k1::PublicKey::from_secret_key(&sk);
         // Cache the pubkey for ease of matching later.
         self.keys.push((sk, pubkey));
         pubkey
@@ -189,10 +195,7 @@ impl TransparentInputInfo {
                 // output may be spent.
                 match TransparentAddress::from_script_pubkey(&script_pubkey) {
                     Some(TransparentAddress::PublicKeyHash(hash)) => {
-                        use ripemd::Ripemd160;
-                        use sha2::Sha256;
-
-                        if hash[..] != Ripemd160::digest(Sha256::digest(pubkey.serialize()))[..] {
+                        if hash != crate::util::hash160::hash(&pubkey.serialize()) {
                             return Err(Error::InvalidAddress);
                         }
                     }
@@ -209,13 +212,7 @@ impl TransparentInputInfo {
                     .and_then(TransparentAddress::from_script_pubkey)
                 {
                     Some(TransparentAddress::ScriptHash(hash)) => {
-                        use ripemd::Ripemd160;
-                        use sha2::Sha256;
-                        use zcash_script::script::Evaluable;
-
-                        if hash[..]
-                            != Ripemd160::digest(Sha256::digest(redeem_script.to_bytes()))[..]
-                        {
+                        if hash != crate::util::hash160::hash(&redeem_script.to_bytes()) {
                             return Err(Error::InvalidAddress);
                         }
                     }
@@ -252,54 +249,49 @@ impl TransparentInputInfo {
     ///
     /// [ZIP 317]: https://zips.z.cash/zip-0317#rationale-for-the-chosen-parameters
     pub fn serialized_len(&self) -> Option<usize> {
-        // PushData(secp256k1::ecdsa::serialized_signature::MAX_LEN + 1)
-        let fake_sig = pv::push_value(&[0; 72 + 1]).expect("short enough");
-
-        let script_len = match &self.spend_info {
+        match &self.spend_info {
             SpendInfo::P2pkh { .. } => {
-                // P2PKH `script_sig` format is:
-                // - PushData(signature || sigtype)
-                // - PushData(pubkey)
+                let fake_sig = pv::push_value(&[0; MAX_SIG_SIZE]).expect("short enough");
                 let fake_pubkey = pv::push_value(&[0; secp256k1::constants::PUBLIC_KEY_SIZE])
                     .expect("short enough");
-                Some(script::Component(vec![fake_sig, fake_pubkey]).byte_len())
+                let script_len = script::Component(vec![fake_sig, fake_pubkey]).byte_len();
+                let script_sig_len = CompactSize::serialized_size(script_len) + script_len;
+                Some(PREVOUT_SIZE + script_sig_len + SEQUENCE_SIZE)
             }
-            SpendInfo::P2sh { redeem_script } => {
-                redeem_script
-                    .refine()
-                    .ok()
-                    .as_ref()
-                    .and_then(solver::standard)
-                    .and_then(|spend_info| match spend_info {
-                        solver::ScriptKind::MultiSig { required, .. } => {
-                            // P2MS-in-P2SH `script_sig` format is:
-                            // - Dummy OP_0 to bypass OP_CHECKMULTISIG bug.
-                            // - PushData(signature || sigtype) * required
-                            // - PushData(redeem_script)
-                            Some(
-                                script::Component(
-                                    iter::empty()
-                                        .chain(Some(pv::_0))
-                                        .chain(core::iter::repeat_n(
-                                            fake_sig,
-                                            usize::from(required),
-                                        ))
-                                        .chain(push_script(redeem_script))
-                                        .collect(),
-                                )
-                                .byte_len(),
-                            )
-                        }
-                        _ => None,
-                    })
-            }
-        }?;
-
-        let prevout_len = 32 + 4;
-        let script_sig_len = CompactSize::serialized_size(script_len) + script_len;
-        let sequence_len = 4;
-        Some(prevout_len + script_sig_len + sequence_len)
+            SpendInfo::P2sh { redeem_script } => p2sh_input_serialized_len(redeem_script),
+        }
     }
+}
+
+/// Computes the serialized input size for a P2SH input given the redeem script.
+///
+/// Returns `None` if the redeem script is not a recognized P2SH script kind (currently
+/// only P2MS-in-P2SH is supported).
+#[cfg(feature = "transparent-inputs")]
+pub fn p2sh_input_serialized_len(redeem_script: &script::FromChain) -> Option<usize> {
+    let fake_sig = pv::push_value(&[0; MAX_SIG_SIZE]).expect("short enough");
+
+    let script_len = redeem_script
+        .refine()
+        .ok()
+        .as_ref()
+        .and_then(solver::standard)
+        .and_then(|spend_info| match spend_info {
+            solver::ScriptKind::MultiSig { required, .. } => Some(
+                script::Component(
+                    iter::empty()
+                        .chain(Some(pv::_0))
+                        .chain(core::iter::repeat_n(fake_sig, usize::from(required)))
+                        .chain(push_script(redeem_script))
+                        .collect(),
+                )
+                .byte_len(),
+            ),
+            _ => None,
+        })?;
+
+    let script_sig_len = CompactSize::serialized_size(script_len) + script_len;
+    Some(PREVOUT_SIZE + script_sig_len + SEQUENCE_SIZE)
 }
 
 pub struct TransparentBuilder {
@@ -319,7 +311,7 @@ impl Authorization for Unauthorized {
 }
 
 #[cfg(feature = "transparent-inputs")]
-pub struct TransparentSignatureContext<'a, V: secp256k1::Verification = secp256k1::VerifyOnly> {
+pub struct TransparentSignatureContext {
     // Data from the original Bundle<Unauthorized>, needed to reconstruct Bundle<Authorized>
     original_vin_unauthorized: Vec<TxIn<Unauthorized>>,
     original_vout: Vec<TxOut>,
@@ -327,7 +319,6 @@ pub struct TransparentSignatureContext<'a, V: secp256k1::Verification = secp256k
 
     // External data references
     sighashes: Vec<[u8; 32]>,
-    secp_ctx: &'a secp256k1::Secp256k1<V>,
 
     // Mutable state: accumulated script signatures for inputs
     final_script_sigs: Vec<Option<script::Sig>>,
@@ -408,10 +399,6 @@ impl TransparentBuilder {
 
     /// Adds a P2SH coin (the output of a previous transaction) to be spent in the
     /// transaction.
-    ///
-    /// This is only for use with [`Self::build_for_pczt`]. It is unsupported with
-    /// [`Self::build`]; the resulting bundle's [`Bundle::apply_signatures`] will return
-    /// an error.
     #[cfg(feature = "transparent-inputs")]
     pub fn add_p2sh_input(
         &mut self,
@@ -613,6 +600,10 @@ impl TransparentAuthorizingContext for Unauthorized {
 }
 
 impl Bundle<Unauthorized> {
+    /// Applies signatures to the bundle using the provided signing set.
+    ///
+    /// All signatures use [`SighashType::ALL`]. For other sighash types, use the PCZT
+    /// signing flow.
     #[cfg_attr(not(feature = "transparent-inputs"), allow(unused_variables))]
     pub fn apply_signatures<F>(
         self,
@@ -629,13 +620,13 @@ impl Bundle<Unauthorized> {
             .iter()
             .enumerate()
             .map(|(index, info)| {
-                match info.spend_info {
+                match &info.spend_info {
                     SpendInfo::P2pkh { pubkey } => {
                         // Find the matching signing key.
                         let (sk, _) = signing_set
                             .keys
                             .iter()
-                            .find(|(_, pk)| pk == &pubkey)
+                            .find(|(_, pk)| pk == pubkey)
                             .ok_or(Error::MissingSigningKey)?;
 
                         let sighash = calculate_sighash(SignableInput {
@@ -647,20 +638,68 @@ impl Bundle<Unauthorized> {
                         });
 
                         let msg = secp256k1::Message::from_digest(sighash);
-                        let sig = signing_set.secp.sign_ecdsa(&msg, sk);
+                        let sig = secp256k1::ecdsa::sign(msg, sk);
 
-                        // Signature has to have "SIGHASH_ALL" appended to it
-                        let mut sig_bytes: Vec<u8> = sig.serialize_der()[..].to_vec();
-                        sig_bytes.extend([SIGHASH_ALL]);
-
-                        // P2PKH scriptSig
-                        Ok(script::Component(vec![
-                            op::push_value(&sig_bytes).expect("length checked"),
-                            op::push_value(&pubkey.serialize()).expect("length checked"),
-                        ]))
+                        Ok(construct_script_sig(&sig, pubkey))
                     }
-                    // P2SH is unsupported here; use the PCZT workflow instead.
-                    SpendInfo::P2sh { .. } => Err(Error::InvalidAddress),
+                    SpendInfo::P2sh { redeem_script } => {
+                        let refined = redeem_script
+                            .refine()
+                            .map_err(|_| Error::UnsupportedScript)?;
+                        let script_code = Script::from(redeem_script);
+                        match solver::standard(&refined) {
+                            Some(solver::ScriptKind::MultiSig { required, pubkeys }) => {
+                                let sighash = calculate_sighash(SignableInput {
+                                    hash_type: SighashType::ALL,
+                                    index,
+                                    script_code: &script_code,
+                                    script_pubkey: info.coin.script_pubkey(),
+                                    value: info.coin.value(),
+                                });
+
+                                let msg = secp256k1::Message::from_digest(sighash);
+
+                                // Collect signatures in pubkey order
+                                let mut script_sig = vec![pv::_0];
+                                let mut sigs_found: u8 = 0;
+
+                                for pubkey_data in pubkeys {
+                                    if sigs_found == required {
+                                        break;
+                                    }
+                                    let pubkey_bytes: [u8; 33] = pubkey_data
+                                        .as_slice()
+                                        .try_into()
+                                        .map_err(|_| Error::UnsupportedScript)?;
+
+                                    if let Some((sk, _)) = signing_set
+                                        .keys
+                                        .iter()
+                                        .find(|(_, pk)| pk.serialize() == pubkey_bytes)
+                                    {
+                                        let sig = secp256k1::ecdsa::sign(msg, sk);
+                                        let mut sig_bytes: Vec<u8> = sig.serialize_der().to_vec();
+                                        sig_bytes.push(SIGHASH_ALL);
+                                        script_sig.push(
+                                            pv::push_value(&sig_bytes).expect("short enough"),
+                                        );
+                                        sigs_found += 1;
+                                    }
+                                }
+
+                                if sigs_found < required {
+                                    return Err(Error::MissingSigningKey);
+                                }
+
+                                script_sig.push(
+                                    push_script(redeem_script).ok_or(Error::UnsupportedScript)?,
+                                );
+
+                                Ok(script::Component(script_sig))
+                            }
+                            _ => Err(Error::UnsupportedScript),
+                        }
+                    }
                 }
             });
 
@@ -693,8 +732,7 @@ impl Bundle<Unauthorized> {
     pub fn prepare_transparent_signatures<F>(
         self,
         calculate_sighash: F,
-        secp_ctx: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
-    ) -> Result<TransparentSignatureContext<'_, secp256k1::VerifyOnly>, Error>
+    ) -> Result<TransparentSignatureContext, Error>
     where
         F: Fn(SignableInput) -> [u8; 32], // The closure's signature
     {
@@ -722,14 +760,13 @@ impl Bundle<Unauthorized> {
             original_vout: self.vout,
             authorization_inputs: self.authorization.inputs,
             sighashes,
-            secp_ctx,
             final_script_sigs: vec![None; num_inputs],
         })
     }
 }
 
 #[cfg(feature = "transparent-inputs")]
-impl TransparentSignatureContext<'_, secp256k1::VerifyOnly> {
+impl TransparentSignatureContext {
     /// Appends a new batch of external signatures to the transparent inputs.
     ///
     /// This method iterates through the provided signatures, applying each one to the
@@ -776,18 +813,14 @@ impl TransparentSignatureContext<'_, secp256k1::VerifyOnly> {
             let sighash_msg = secp256k1::Message::from_digest(self.sighashes[input_idx]);
 
             // We only support external signatures for P2PKH inputs.
-            if let SpendInfo::P2pkh { pubkey } = &input_info.spend_info {
-                if self
-                    .secp_ctx
-                    .verify_ecdsa(&sighash_msg, signature, pubkey)
-                    .is_ok()
-                {
-                    if matched_input_idx.is_some() {
-                        // This signature was already valid for a different input.
-                        return Err(Error::DuplicateSignature);
-                    }
-                    matched_input_idx = Some((input_idx, pubkey));
+            if let SpendInfo::P2pkh { pubkey } = &input_info.spend_info
+                && secp256k1::ecdsa::verify(signature, sighash_msg, pubkey).is_ok()
+            {
+                if matched_input_idx.is_some() {
+                    // This signature was already valid for a different input.
+                    return Err(Error::DuplicateSignature);
                 }
+                matched_input_idx = Some((input_idx, pubkey));
             }
         }
 
@@ -842,27 +875,26 @@ impl TransparentSignatureContext<'_, secp256k1::VerifyOnly> {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", feature = "transparent-inputs"))]
 mod tests {
+    use std::vec::Vec;
+
     use super::{Error, OutPoint, SignableInput, TransparentBuilder, TxOut};
     use crate::address::TransparentAddress;
-    use ripemd::Ripemd160;
-    use secp256k1::{Message, Secp256k1, SecretKey};
-    use sha2::{Digest, Sha256};
-    use zcash_address::ZcashAddress;
+    use secp256k1::{Message, SecretKey};
     use zcash_protocol::value::Zatoshis;
+
+    /// The pubkey hash of the P2PKH address that the tests pay. Its value is arbitrary.
+    const RECIPIENT_PUBKEY_HASH: [u8; 20] = [0x11; 20];
 
     // Helper that takes a key to create distinct inputs.
     fn new_p2pkh_spend_with_key(
         key_bytes: [u8; 32],
     ) -> (SecretKey, secp256k1::PublicKey, TxOut, OutPoint) {
-        let sk = SecretKey::from_slice(&key_bytes).expect("32 bytes is a valid secret key");
-        let secp = Secp256k1::new();
-        let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk);
+        let sk = SecretKey::from_secret_bytes(key_bytes).expect("32 bytes is a valid secret key");
+        let pk = secp256k1::PublicKey::from_secret_key(&sk);
 
-        let pk_hash_generic_array = Ripemd160::digest(Sha256::digest(pk.serialize()));
-        let pk_hash_bytes: [u8; 20] = pk_hash_generic_array.into();
-        let taddr = TransparentAddress::PublicKeyHash(pk_hash_bytes);
+        let taddr = TransparentAddress::PublicKeyHash(crate::util::hash160::hash(&pk.serialize()));
 
         let txout = TxOut::new(Zatoshis::from_u64(10000).unwrap(), taddr.script().into());
 
@@ -874,17 +906,11 @@ mod tests {
 
     #[test]
     fn append_and_finalize_signatures() {
-        let addr_str = "tmNUFAr71YAW3eXetm8fhx7k8zpUJYQiKZP";
-        let generic_addr: ZcashAddress = addr_str
-            .parse()
-            .expect("Test address string should be valid");
-        let taddr: TransparentAddress = generic_addr
-            .convert()
-            .expect("Conversion to TransparentAddress should succeed");
+        let taddr = TransparentAddress::PublicKeyHash(RECIPIENT_PUBKEY_HASH);
 
         // Create two inputs with corresponding secret keys for signing
         let (sk1, pk1, coin1, utxo1) = new_p2pkh_spend_with_key([1; 32]);
-        let (sk2, pk2, coin2, utxo2) = new_p2pkh_spend_with_key([1; 32]);
+        let (sk2, pk2, coin2, utxo2) = new_p2pkh_spend_with_key([2; 32]);
 
         // Create a builder and add the inputs and a dummy output
         let mut builder = TransparentBuilder::empty();
@@ -897,9 +923,6 @@ mod tests {
         // Build the unauthorized bundle
         let bundle = builder.build().unwrap();
 
-        // Create the secp256k1 context for verification
-        let secp = Secp256k1::verification_only();
-
         // This closure will be called by `prepare_transparent_signatures` for each input.
         // For this test, we'll just return a fixed, unique hash for each input.
         let calculate_sighash = |input: SignableInput| {
@@ -911,18 +934,17 @@ mod tests {
 
         // Prepare the signing context
         let sig_context = bundle
-            .prepare_transparent_signatures(calculate_sighash, &secp)
+            .prepare_transparent_signatures(calculate_sighash)
             .unwrap();
 
         let sighash1 = sig_context.sighashes[0];
         let sighash2 = sig_context.sighashes[1];
 
         // Sign with the corresponding secret keys
-        let signing_secp = Secp256k1::signing_only();
-        let msg1 = Message::from_digest_slice(&sighash1).unwrap();
-        let msg2 = Message::from_digest_slice(&sighash2).unwrap();
-        let sig1 = signing_secp.sign_ecdsa(&msg1, &sk1);
-        let sig2 = signing_secp.sign_ecdsa(&msg2, &sk2);
+        let msg1 = Message::from_digest(sighash1);
+        let msg2 = Message::from_digest(sighash2);
+        let sig1 = secp256k1::ecdsa::sign(msg1, &sk1);
+        let sig2 = secp256k1::ecdsa::sign(msg2, &sk2);
 
         // Create a batch with the correct signatures
         let signatures_batch = vec![sig1, sig2];
@@ -945,19 +967,18 @@ mod tests {
         let bundle = builder.build().unwrap();
 
         // Prepare the signing context
-        let secp = Secp256k1::verification_only();
         let calculate_sighash = |input: SignableInput| [input.index as u8; 32];
         let sig_context = bundle
-            .prepare_transparent_signatures(calculate_sighash, &secp)
+            .prepare_transparent_signatures(calculate_sighash)
             .unwrap();
 
         // Create a signature from a different key
         let unrelated_sk_bytes = [2; 32];
-        let unrelated_sk = SecretKey::from_slice(&unrelated_sk_bytes).unwrap();
+        let unrelated_sk = SecretKey::from_secret_bytes(unrelated_sk_bytes).unwrap();
 
         let sighash = sig_context.sighashes[0];
-        let msg = Message::from_digest_slice(&sighash).unwrap();
-        let bad_signature = Secp256k1::signing_only().sign_ecdsa(&msg, &unrelated_sk);
+        let msg = Message::from_digest(sighash);
+        let bad_signature = secp256k1::ecdsa::sign(msg, &unrelated_sk);
 
         // Assert that appending this "bad" signature fails with the correct error
         let result = sig_context.append_external_signatures(&[bad_signature]);
@@ -985,17 +1006,16 @@ mod tests {
         let bundle = builder.build().unwrap();
 
         // Prepare the signing context
-        let secp = Secp256k1::verification_only();
         // Make both sighashes the same for this test.
         let calculate_sighash = |_input: SignableInput| [42; 32];
         let sig_context = bundle
-            .prepare_transparent_signatures(calculate_sighash, &secp)
+            .prepare_transparent_signatures(calculate_sighash)
             .unwrap();
 
         // Create one signature from the first key that will now appear valid for both inputs
         let sighash = sig_context.sighashes[0]; // Both sighashes are identical ([42; 32])
-        let msg = Message::from_digest_slice(&sighash).unwrap();
-        let ambiguous_sig = Secp256k1::signing_only().sign_ecdsa(&msg, &sk);
+        let msg = Message::from_digest(sighash);
+        let ambiguous_sig = secp256k1::ecdsa::sign(msg, &sk);
 
         // Assert that appending this one signature fails with DuplicateSignature
         let result = sig_context.append_external_signatures(&[ambiguous_sig]);
@@ -1014,20 +1034,19 @@ mod tests {
         let bundle = builder.build().unwrap();
 
         // Prepare the signing context
-        let secp = Secp256k1::verification_only();
         let calculate_sighash = |input: SignableInput| {
             let mut sighash = [0u8; 32];
             sighash[0] = input.index as u8; // A simple, unique sighash for each input
             sighash
         };
         let sig_context = bundle
-            .prepare_transparent_signatures(calculate_sighash, &secp)
+            .prepare_transparent_signatures(calculate_sighash)
             .unwrap();
 
         // Create and append a signature for only the first input
         let sighash1 = sig_context.sighashes[0];
-        let msg1 = Message::from_digest_slice(&sighash1).unwrap();
-        let sig1 = Secp256k1::signing_only().sign_ecdsa(&msg1, &sk1);
+        let msg1 = Message::from_digest(sighash1);
+        let sig1 = secp256k1::ecdsa::sign(msg1, &sk1);
 
         // This append operation should succeed, as we are providing one valid signature.
         let result_after_append = sig_context.append_external_signatures(&[sig1]);
@@ -1042,8 +1061,102 @@ mod tests {
         let final_bundle_result = partially_signed_context.finalize_signatures();
         assert!(
             matches!(final_bundle_result, Err(Error::MissingSignatures)),
-            "Should fail with MissingSignatures, but got: {:?}",
-            final_bundle_result
+            "Should fail with MissingSignatures, but got: {final_bundle_result:?}"
         );
+    }
+
+    /// Helper to create a 2-of-2 P2SH multisig spend input.
+    fn new_p2sh_2of2_spend(
+        key_bytes_1: [u8; 32],
+        key_bytes_2: [u8; 32],
+    ) -> (
+        Vec<SecretKey>,
+        zcash_script::script::FromChain,
+        TxOut,
+        OutPoint,
+    ) {
+        use zcash_script::pattern::check_multisig;
+        use zcash_script::script::{Component, Evaluable, FromChain};
+
+        let sk1 = SecretKey::from_secret_bytes(key_bytes_1).unwrap();
+        let sk2 = SecretKey::from_secret_bytes(key_bytes_2).unwrap();
+        let pk1 = secp256k1::PublicKey::from_secret_key(&sk1);
+        let pk2 = secp256k1::PublicKey::from_secret_key(&sk2);
+
+        // Build a 2-of-2 multisig redeem script
+        let redeem_script: FromChain =
+            Component(check_multisig(2, &[&pk1.serialize(), &pk2.serialize()], false).unwrap())
+                .weaken();
+
+        // Create P2SH address from HASH160(redeem_script)
+        let taddr =
+            TransparentAddress::ScriptHash(crate::util::hash160::hash(&redeem_script.to_bytes()));
+
+        let txout = TxOut::new(Zatoshis::from_u64(10000).unwrap(), taddr.script().into());
+        let outpoint = OutPoint::new([0u8; 32], 0);
+
+        (vec![sk1, sk2], redeem_script, txout, outpoint)
+    }
+
+    #[test]
+    fn apply_signatures_p2sh() {
+        use super::TransparentSigningSet;
+
+        let taddr = TransparentAddress::PublicKeyHash(RECIPIENT_PUBKEY_HASH);
+
+        let (sks, redeem_script, coin, utxo) = new_p2sh_2of2_spend([1; 32], [2; 32]);
+
+        let mut builder = TransparentBuilder::empty();
+        builder.add_p2sh_input(redeem_script, utxo, coin).unwrap();
+        builder
+            .add_output(&taddr, Zatoshis::from_u64(5000).unwrap())
+            .unwrap();
+
+        let bundle = builder.build().unwrap();
+
+        // Add both signing keys to the signing set
+        let mut signing_set = TransparentSigningSet::new();
+        for sk in &sks {
+            signing_set.add_key(*sk);
+        }
+
+        let calculate_sighash = |input: SignableInput| {
+            let mut sighash = [0u8; 32];
+            sighash[0] = input.index as u8;
+            sighash
+        };
+
+        let result = bundle.apply_signatures(calculate_sighash, &signing_set);
+        assert!(result.is_ok(), "P2SH apply_signatures failed: {result:?}");
+    }
+
+    #[test]
+    fn apply_signatures_p2sh_missing_key() {
+        use super::TransparentSigningSet;
+
+        let taddr = TransparentAddress::PublicKeyHash(RECIPIENT_PUBKEY_HASH);
+
+        let (sks, redeem_script, coin, utxo) = new_p2sh_2of2_spend([1; 32], [2; 32]);
+
+        let mut builder = TransparentBuilder::empty();
+        builder.add_p2sh_input(redeem_script, utxo, coin).unwrap();
+        builder
+            .add_output(&taddr, Zatoshis::from_u64(5000).unwrap())
+            .unwrap();
+
+        let bundle = builder.build().unwrap();
+
+        // Only add one signing key (need 2-of-2)
+        let mut signing_set = TransparentSigningSet::new();
+        signing_set.add_key(sks[0]);
+
+        let calculate_sighash = |input: SignableInput| {
+            let mut sighash = [0u8; 32];
+            sighash[0] = input.index as u8;
+            sighash
+        };
+
+        let result = bundle.apply_signatures(calculate_sighash, &signing_set);
+        assert!(matches!(result, Err(Error::MissingSigningKey)));
     }
 }
