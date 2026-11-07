@@ -75,6 +75,18 @@ who = "Daira-Emma Hopwood <daira@jacaranda.org>"
 criteria = "safe-to-deploy"
 delta = "1.2.0 -> 1.3.0"
 
+[[audits.base64]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "0.22.1 -> 0.23.1"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+0.22.1 archive SHA256: 72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6.
+0.23.1 archive SHA256: ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5.
+All production deltas and the entire 807-line SIMD implementation reviewed, including bounds, invalid symbols, exact stores and scalar terminal checks. Native ARM all-feature tests passed:290 unit, 6 encode, 7 integration and 26 doctests. Actual candidate resolves alloc,std without SIMD. AVX2 source reviewed but AVX2 hardware and Miri not exercised; existing variable-time behavior is not claimed constant-time.
+"""
+
 [[audits.base64ct]]
 who = "Jack Grigg <jack@electriccoin.co>"
 criteria = "safe-to-deploy"
@@ -126,6 +138,18 @@ delta = "0.5.3 -> 0.7.0"
 who = "Daira-Emma Hopwood <daira@jacaranda.org>"
 criteria = "safe-to-deploy"
 delta = "1.0.94 -> 1.0.97"
+
+[[audits.cc]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "1.2.17 -> 1.11.1"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+1.2.17 archive SHA256: 1fcb57c740ae1daf453ae85f16e37396f672b039e00d9d866e07ddb24e328e3a.
+1.11.1 archive SHA256: 4ff2a8126fff0f8c839080d619675a585e61720bb12d2baceae45769fd66f155.
+All changed production source, new reactor/environment/logging/compile-command modules and manifests reviewed. Native ARM: 48 unit and 33 doctest tests passed;2 upstream target-matrix tests ignored. Independent2 C and 1 C++ parallel compile/archive/link/execute probe and3 compilation records passed. Compiler/source/environment inputs are trusted build inputs; hostile concurrent output directories are not sandboxed. No Windows/Linux/CUDA/cross-target or Miri execution claim. Separate find-msvc-tools review remains required.
+"""
 
 [[audits.ciborium]]
 who = "Daira-Emma Hopwood <daira@jacaranda.org>"
@@ -295,6 +319,17 @@ https://github.com/wangyi-fudan/wyhash/blob/408620b6d12b7d667b3dd6ae39b7929a39e8
 I have no way to check whether these constants are an improvement or not.
 """
 
+[[audits.find-msvc-tools]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+version = "0.1.0"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+0.1.0 archive SHA256: e178e4fba8a2726903f6ba98a6d221e76f9c12c650d5dc0e6afdc50677b49650.
+Complete 2651-line Rust production source, manifests and Windows test bodies reviewed, including Win32/COM ownership, buffers, compiler/vswhere commands and trusted build-input assumptions. Exported discovery API paths qualify under documented OS contracts; this is not a claim about arbitrary foreign-interface outputs. Native ARM check/tests execute zero Windows-gated tests. No Windows runtime validation or transitive dependency certification.
+"""
+
 [[audits.fs-mistrust]]
 who = "Jack Grigg <jack@electriccoin.co>"
 criteria = "safe-to-deploy"
@@ -438,6 +473,18 @@ who = "Daira-Emma Hopwood <daira@jacaranda.org>"
 criteria = "safe-to-run"
 delta = "0.4.9 -> 0.4.12"
 
+[[audits.jobserver]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "0.1.31 -> 0.1.35"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+0.1.31 archive SHA256: d2b099aaa34a9751c5bf0878add70444e1ed2dd73f347be99003d4577277de6e.
+0.1.35 archive SHA256: 1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3.
+All changed production source, descriptor/handle ownership, semaphore/signal helper and process inheritance contracts reviewed. Native ARM unit, GNU Make client/server/helper integration and doctests passed. Linux /dev/fd, GNU Make>=4.4, Windows and AIX execution were not performed. Baseline is the existing 0.1.31 exemption; no new baseline certification.
+"""
+
 [[audits.js-sys]]
 who = "Daira-Emma Hopwood <daira@jacaranda.org>"
 criteria = "safe-to-deploy"
@@ -447,6 +494,18 @@ delta = "0.3.65 -> 0.3.66"
 who = "Daira-Emma Hopwood <daira@jacaranda.org>"
 criteria = "safe-to-run"
 delta = "0.4.11 -> 0.4.12"
+
+[[audits.log]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "0.4.29 -> 0.4.35"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+0.4.29 archive SHA256: 5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897.
+0.4.35 archive SHA256: 5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c.
+All changed production modules, macro/lifetime/logger publication paths and manifests reviewed. Native ARM default/std/KV test matrices and alloc-only check passed; one existing ignored unit retained. Actual candidate uses alloc,std. No no-atomics hardware, Miri or MSRV execution claim.
+"""
 
 [[audits.memchr]]
 who = "Jack Grigg <jack@electriccoin.co>"
@@ -467,6 +526,24 @@ delta = "2.11.0 -> 2.11.2"
 who = "Jack Grigg <jack@electriccoin.co>"
 criteria = "safe-to-deploy"
 delta = "2.11.2 -> 2.12.0"
+
+[[audits.minreq]]
+who = "Free2Z Codex dependency review"
+criteria = "safe-to-deploy"
+delta = "2.12.0 -> 3.0.0@git:d95a0f3f94d888f8e0cd3445dfc912ae15fbcb09"
+importable = false
+notes = """
+Reviewed all changed production source and manifests from registry 2.12.0 through
+this exact maintained source revision, including upstream request/lint changes
+and the independently reviewed explicit-port/fragment/proxy parsing repair.
+Baseline archive SHA256: 763d142cdff44aaadd9268bebddb156ef6c65a0e13486bb81673cf2d8739f9b0.
+Reviewed Git tree: 0d4ce8d75435f7386861413948483bd850a6d4c7.
+Native 13 unit, 25 HTTP integration and 18 doctest tests pass; fork CI Linux/macOS/Windows feature suites,
+TLS lint/doc checks and Rust1.63 minimum-version checks pass. Existing environment
+proxy selection and exclusion limitations are not expanded by this repair.
+Independent review: https://github.com/free2z/minreq/pull/1. This record qualifies
+only this Git target and does not certify registry 3.0.0 or transitive packages.
+"""
 
 [[audits.nonempty]]
 who = "Kris Nuttycombe <kris@nutty.land>"
@@ -792,6 +869,42 @@ that the client MUST NOT send an IP address in host_name, and then explicitly sp
 the server behaviour if it does so anyway. That's how I would write it now. But honestly
 this extension was one of the most bikeshedded parts of RFC 3546, to a much greater extent
 than I'd anticipated, and I was tired.)
+"""
+
+[[audits.rustls]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "0.23.25 -> 0.23.37"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+0.23.25 archive SHA256: 822ee9188ac4ec04a2f0531e55d035fb2de73f18b41a63c70c2712503b6fb13c.
+0.23.37 archive SHA256: 758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4.
+All changed production/test source, parser/state-machine contexts, manifests and build script reviewed. Authentication/resumption, extension bounds, ECH, key extraction, QUIC nonce caller contracts, provider selection and I/O progress checked. Exact VCS fixtures have byte-identical production sources. Native ARM locked Ring 495 and AWS 498 tests passed, each with9 upstream ignored cases. No FIPS, Windows, MSRV, Miri, fuzz or primitive cryptographic proof claimed; later imported source edges remain separate.
+"""
+
+[[audits.rustls-pki-types]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "1.11.0 -> 1.15.1"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+1.11.0 archive SHA256: 917ce264624a4b4db1c364dcc35bfca9ded014d0a958cd47ad3e960e988ea51c.
+1.15.1 archive SHA256: 2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96.
+All changed production source/manifests reviewed, including PEM progress/error handling, DNS validation and algorithm OIDs. Native ARM: 18 unit and3 independent PEM regressions passed;336,715 old/new DNS cases matched. Four doctests passed; nine could not run because published archives omit fixtures. Diagnostic display and peak-allocation limitations were distinguished from new regressions. No dependency-wide or full-suite claim.
+"""
+
+[[audits.rustls-webpki]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "0.103.3 -> 0.103.10"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+0.103.3 archive SHA256: e4a72fe2bcf7a6ac6fd7d0b9e5cb68aeb7d4c0a0271730218b3e92d43b4eb435.
+0.103.10 archive SHA256: df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef.
+All changed production parsing, EKU, CRL, signature/algorithm code and manifests reviewed. Exact published VCS restored omitted fixtures with byte-identical production source. Native ARM Ring 387 full-suite tests plus 60 no-default unit tests, AWS-LC unstable 112 tests and no-default check passed; two upstream cases ignored. No FIPS, Windows/Linux, MSRV, fuzz or primitive cryptographic proof claimed. Later imported source edges remain separate.
 """
 
 [[audits.rustversion]]
@@ -1732,6 +1845,53 @@ who = "Jack Grigg <jack@electriccoin.co>"
 criteria = "safe-to-deploy"
 delta = "0.3.2 -> 0.3.3"
 
+[[audits.ureq]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "2.9.1 -> 2.9.6"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+2.9.1 archive SHA256: f8cdd25c339e200129fe4de81451814e5228c9b771d57378817d6117cc2b3f97.
+2.9.6 archive SHA256: 11f214ce18d8b2cbe84ed3aa6486ed3f5b285cf8d8fbdbce9f3f767a724adc35.
+All changed production source, complete TLS adapters, timeout/connect context and manifests reviewed. Native ARM testdeps 108 tests and broader-feature 155 tests passed with external probes filtered. The broader historical test graph required a test-only time 0.3.34 -> 0.3.44 refresh for current Rust; source unchanged. No full historical-lock, cross-platform native-TLS, full doctest or MSRV claim. This is a historical forward chain edge, not a recommendation to deploy this version; newer Ureq code and transitive dependencies are separate obligations.
+"""
+
+[[audits.ureq]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "3.1.4 -> 3.5.1@git:23828663be7e6e187d43fd9a9b9c820d54f2ddf0"
+importable = false
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+3.1.4 archive SHA256: d39cb1dbab692d82a977c0392ffac19e188bd9186a9f32806f0aaa859d75585a.
+3.5.1 archive SHA256: e7be76686bdf7198002062423ca0d8cf9b75a27c8e1de804513b97e97b555d9d.
+Reviewed the complete forward production delta, transport/TLS/pool/body contexts,
+and the generic connection-budget corrections in free2z/ureq#1 and algesten/ureq#1229.
+The target is only the corrected Git tree 4d97e48b2963582e5343e56f0717ac99413f3a02,
+identical to independently reviewed commit 179303fd6434597e37b460158e9623508eeeee9e;
+this record does not certify the unmodified registry 3.5.1 package.
+Native validation: 201 library, 9 SOCKS and 4 EINTR tests; real-socket CONNECT
+Global/Connect tests and clippy passed. The unmodified-source controls failed.
+All 45 fork CI jobs passed, including real-socket CONNECT checks on each platform.
+The new CONNECT fixture uses HTTP, not an HTTPS proxy with subsequent target TLS.
+No whole-application timeout or cryptographic backend certification is implied;
+transitive packages and the final application feature graph require separate checks.
+"""
+
+[[audits.ureq-proto]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "0.5.3 -> 0.7.1"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+0.5.3 archive SHA256: d81f9efa9df032be5934a46a068815a10a042b494b6a58cb0a1a97bb5467ed6f.
+0.7.1 archive SHA256: 622dce33c252115466d83f63e9744a18f12b4406aae51a01c15ad8fcf1185eb3.
+All changed production source and complete new raw-header implementation reviewed, including state transitions, framing bounds, redirect/pooling and client/server controls. Native ARM all-features252 unit and 2 doctest and client-only172 unit and 1 doctest tests passed. No new unsafe operation. Existing HTTP tolerance is not a full request-smuggling proof or a blanket certification of adapters and peers.
+"""
+
 [[audits.utf8parse]]
 who = "Jack Grigg <jack@electriccoin.co>"
 criteria = "safe-to-run"
@@ -1772,6 +1932,18 @@ who = "Daira-Emma Hopwood <daira@jacaranda.org>"
 criteria = "safe-to-deploy"
 delta = "0.25.2 -> 0.25.4"
 notes = "I have not checked consistency with the Mozilla IncludedCACertificateReportPEMCSV report."
+
+[[audits.webpki-roots]]
+who = "OpenAI Codex (Free2Z source review agents)"
+criteria = "safe-to-deploy"
+delta = "0.26.8 -> 1.0.11"
+notes = """
+2026-11-06: Source reviewed by one Codex agent; exact-version receipt
+independently reviewed by a different Codex agent.
+0.26.8 archive SHA256: 2210b291f7ea53617fbafcc4939f10914214ec15aace5ba62293a668f322c5c9.
+1.0.11 archive SHA256: f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171.
+Direct forward data delta reviewed through exact certificate DER, SHA256, subject/SPKI and constraints:10 added current-NSS-approved anchors, 41 removals, 108 unchanged anchors. Two native verification tests passed. No existing constraint widened. This qualifies the forward delta, not full trust-store freshness or equivalence to changing browser policy; static anchors cannot represent every issuance-date or revocation rule. The reverse0.26.8->0.26.1 edge is not approved.
+"""
 
 [[audits.which]]
 who = "Jack Grigg <jack@electriccoin.co>"

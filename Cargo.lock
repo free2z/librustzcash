@@ -2977,8 +2977,7 @@ dependencies = [
 [[package]]
 name = "minreq"
 version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "659579df697b372ef9e36f02fcbb41f6d6f157dcec7db9c9618fa0f23cf0fc20"
+source = "git+https://github.com/free2z/minreq?rev=d95a0f3f94d888f8e0cd3445dfc912ae15fbcb09#d95a0f3f94d888f8e0cd3445dfc912ae15fbcb09"
 
 [[package]]
 name = "mio"
@@ -5157,7 +5156,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6746,8 +6745,7 @@ checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
 [[package]]
 name = "ureq"
 version = "3.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7be76686bdf7198002062423ca0d8cf9b75a27c8e1de804513b97e97b555d9d"
+source = "git+https://github.com/free2z/ureq?rev=23828663be7e6e187d43fd9a9b9c820d54f2ddf0#23828663be7e6e187d43fd9a9b9c820d54f2ddf0"
 dependencies = [
  "base64 0.23.1",
  "log",
